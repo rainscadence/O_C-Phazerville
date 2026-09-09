@@ -24,6 +24,7 @@
 //
 
 #include "OC_apps.h"
+#include "ii/Lifecycle.h"
 #include "OC_global_settings.h"
 #include "OC_io_settings_menu.h"
 #include "OC_calibration.h"
@@ -39,8 +40,10 @@ static bool z_button_hold = false;
 
 void AppBase::InitDefaults()
 {
+  phz::ii::Transition transition;
   io_settings_.InitDefaults();
   Init();
+  transition.Complete();
 }
 
 size_t AppBase::Save(util::StreamBufferWriter &stream_buffer) const
@@ -52,8 +55,10 @@ size_t AppBase::Save(util::StreamBufferWriter &stream_buffer) const
 
 size_t AppBase::Restore(util::StreamBufferReader &stream_buffer)
 {
+  phz::ii::Transition transition;
   io_settings_.Restore(stream_buffer);
   RestoreAppData(stream_buffer);
+  if (!stream_buffer.underflow()) transition.Complete();
   return stream_buffer.read();
 }
 
@@ -138,6 +143,18 @@ UiMode AppBase::DispatchEvent(const UI::Event &event)
 
 void AppBase::DispatchAppEvent(AppEvent app_event)
 {
+  if (app_event == APP_EVENT_RESUME || app_event == APP_EVENT_SUSPEND) {
+    phz::ii::SetHostActive(false);
+    // Resume alone must not erase a prior failed restore. Only an actual full
+    // preset/reinitialization may request recovery.
+    phz::ii::Transition transition;
+    if (app_event == APP_EVENT_RESUME) io_settings_menu.Close();
+    HandleAppEvent(app_event);
+    z_button_hold = false;
+    transition.Complete();
+    phz::ii::SetHostActive(app_event == APP_EVENT_RESUME && IiReady());
+    return;
+  }
   switch(app_event) {
     case APP_EVENT_RESUME:
     io_settings_menu.Close();

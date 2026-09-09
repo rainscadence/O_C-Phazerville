@@ -3,14 +3,14 @@
 #ifdef __IMXRT1062__
 #include <LittleFS.h>
 #include <SD.h>
-#include <unordered_map>
+#include "config/Store.h"
 
 extern bool SDcard_Ready;
 
 namespace PhzConfig {
   using KEY = uint16_t;
   using VALUE = uint64_t;
-  using ConfigMap = std::unordered_map<KEY, VALUE>;
+  using ConfigMap = phz::config::Map;
 
   const char * const CONFIG_FILENAME = "GLOBALS.CFG";
 
@@ -22,6 +22,18 @@ namespace PhzConfig {
   bool load_config(const char* filename = CONFIG_FILENAME, FS &fs = myfs);
   bool save_config(const char* filename = CONFIG_FILENAME, FS &fs = myfs);
   void clear_config();
+  phz::config::LoadResult last_load_result();
+  // Global saves must not replace the current app/bank working context.
+  class ScopedContext {
+   public:
+    ScopedContext();
+    ~ScopedContext();
+    ScopedContext(const ScopedContext&) = delete;
+    ScopedContext& operator=(const ScopedContext&) = delete;
+   private:
+    phz::config::ContextScope scope_;
+    phz::config::LoadResult load_;
+  };
 
   void setValue(KEY key, VALUE value);
   bool getValue(KEY key, VALUE &value);

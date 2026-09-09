@@ -24,6 +24,7 @@
 #define OC_APP_H_
 
 #include "OC_options.h"
+#include "ii/Parameter.h"
 #include "OC_io.h"
 #include "OC_ui.h"
 #include "src/UI/ui_events.h"
@@ -40,6 +41,10 @@ namespace OC {
 
 void draw_save_message(uint8_t c);
 void SaveAppData();
+#if defined(ARDUINO_TEENSY41)
+bool SaveIiAddress();
+void ServiceIi();
+#endif
 
 static inline void save_app_data() { SaveAppData(); }
 
@@ -70,6 +75,11 @@ enum AppEvent {
 class AppBase {
 public:
   virtual ~AppBase() { }
+
+  // ii adapters are opt-in. These run under the short final IRQ lock.
+  virtual bool DescribeIi(const phz::ii::Write&, phz::ii::Descriptor&) { return false; }
+  virtual bool ApplyIi(const phz::ii::Prepared&) { return false; }
+  virtual bool IiReady() { return false; }
   
   inline uint16_t id() const { return id_; }
   inline const char *name() const { return name_; }

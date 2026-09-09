@@ -20,6 +20,7 @@
 // SOFTWARE.
 
 #pragma once
+#include "ii/Lifecycle.h"
 
 // per bank file
 static constexpr int QUAD_PRESET_COUNT = 32;
@@ -34,7 +35,43 @@ OC_APP_CLASS(AppQuadrants, TWOCCS("QS"), "Quadrants", "4x Applets"),
 public:
   OC_APP_INTERFACE_DECLARE(AppQuadrants, 0);
 
+
+    HS::HemisphereApplet* IiTarget(uint16_t word, uint64_t& type) {
+      phz::ii::Slot slot{};
+      if (!phz::ii::DecodeSlot(word, slot)) return nullptr;
+      if (slot.bank != phz::ii::SlotBank::Standard)
+        return audio_app.PeekIiTarget(slot, type);
+      const int index = active_applet_index[slot.index];
+      if (index < 0 || index >= HS::HEMISPHERE_AVAILABLE_APPLETS) return nullptr;
+      type = HS::appletIds[index];
+      return active_applet[slot.index];
+    }
+    bool IiReady() override {
+      uint64_t type;
+      for (uint16_t slot = 1; slot <= 4; ++slot)
+        if (!IiTarget(slot, type)) return false;
+      return audio_app.IiReady();
+    }
+    bool DescribeIi(const phz::ii::Write& write, phz::ii::Descriptor& out) override {
+      uint64_t type;
+      auto* target = IiTarget(write.slot, type);
+      if (!target || !target->DescribeIiParameter(write.parameter, out)) return false;
+      out.instance = target;
+      out.type = type;
+      out.slot = write.slot;
+      out.parameter = write.parameter;
+      return true;
+    }
+    bool ApplyIi(const phz::ii::Prepared& update) override {
+      uint64_t type;
+      const auto& d = update.descriptor;
+      auto* target = IiTarget(d.slot, type);
+      return target && target == d.instance && type == d.type &&
+        target->ApplyIiParameter(d.parameter, update.value, d.dependencies);
+    }
+
     void Start() {
+    phz::ii::Transition transition(true);
         audio_app.Init();
 
         //bank_filename[16] = "BANK_000.DAT";
@@ -43,7 +80,6 @@ public:
         queued_preset = -1;
         preset_cursor = 0;
 
-        //HemisphereApplet *active_applet[4]; // Pointers to actual applets
         view_slot[0] = 0;
         view_slot[1] = 0;
         config_cursor = LOAD_PRESET;
@@ -62,7 +98,8 @@ public:
         //SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(15)); // EuclidX
         //SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(68)); // DivSeq
         //SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(71)); // Pigeons
-    }
+    if (IiReady()) transition.Complete();
+  }
 
     void Resume() {
         SetBank(bank_num);
@@ -80,45 +117,7 @@ public:
             //OnSendSysEx();
         }
     }
-    void SetBank(uint8_t id) {
-      bank_filename[5] = '0' + char(id / 100);
-      bank_filename[6] = '0' + char(id / 10 % 10);
-      bank_filename[7] = '0' + char(id % 10);
-
-      bool success = false;
-      if (SDcard_Ready) // load from SD card
-        success = PhzConfig::load_config(bank_filename, SD);
-
-      if (!success) // fallback load from LFS
-        PhzConfig::load_config(bank_filename);
-
-      LoadGlobals();
-
-      // Version flag - for future reconfigurations...
-      //  - This can be used to migrate old data after breaking changes to the schema
-      //  - Right now, its existence indicates v1.10.1+
-      uint64_t data = 0;
-      bool version_key_present = PhzConfig::getValue(VERSION_KEY, data);
-      int preset_file_revision = version_key_present? data : 0;
-
-      // Data migration to protect against a bug in v1.10
-      // This can be removed later, when we're sure no one is still using broken preset files...
-      if (!version_key_present) {
-        for (size_t i = 0; i < QUAD_PRESET_COUNT; ++i) {
-          PhzConfig::deleteKey((i << 11) | (CVMAP_KEY + 1));
-          PhzConfig::deleteKey((i << 11) | (TRIGMAP_KEY + 1));
-        }
-      }
-      if (preset_file_revision < 1) {
-        // migrations from v1.x to v2.0 go here
-        // these are handled elsewhere in Unpack() functions:
-        // - CVInputMap sources got remapped
-        // - MIDI Map functions got remapped
-      }
-
-      // update version key after all data migrations
-      PhzConfig::setValue(VERSION_KEY, PRESET_FILE_REVISION);
-    }
+    FLASHMEM __attribute__((noinline)) void SetBank(uint8_t id);
 
     // lower 11 bits of PhzConfig KEY
     // Audio applet data keys also use 11 bits, with the upper 3 being non-zero...
@@ -311,7 +310,8 @@ public:
 
     void LoadFromPreset(int id);
     void load_from_preset(int id) {
-        preset_id = id;
+    phz::ii::Transition transition(true);
+        if (id < 0 || id >= QUAD_PRESET_COUNT) return;
 
         uint16_t preset_key = id << 11;
         uint64_t data;
@@ -320,18 +320,26 @@ public:
         if (!PhzConfig::getValue(preset_key | APPLET_METADATA_KEY, data)) return;
         if (!data) return;
 
-        for (size_t h = 0; h < APPLET_SLOTS; h++)
-        {
-            int index = HS::get_applet_index_by_id( Unpack(data, PackLocation{h*8, 8}) );
-
-            // applet data
-            PhzConfig::getValue(preset_key | (APPLET_L1_DATA_KEY + h), applet_data[h]);
-            SetApplet(HEM_SIDE(h), index);
-            HS::get_applet(index, HEM_SIDE(h))->OnDataReceive(applet_data[h]);
+        // Validate required records and identities before changing any occupant.
+        int indices[APPLET_SLOTS];
+        uint64_t values[APPLET_SLOTS], saved_clock;
+        if (!PhzConfig::getValue(preset_key | CLOCK_DATA_KEY, saved_clock)) return;
+        for (size_t h = 0; h < APPLET_SLOTS; ++h) {
+          const auto type = Unpack(data, PackLocation{h*8, 8});
+          indices[h] = HS::get_applet_index_by_id(type);
+          if (HS::appletIds[indices[h]] != type ||
+              !PhzConfig::getValue(preset_key | (APPLET_L1_DATA_KEY + h), values[h])) return;
+        }
+        for (size_t h = 0; h < APPLET_SLOTS; ++h) {
+          SetApplet(HEM_SIDE(h), indices[h]);
+          auto* target = active_applet[h];
+          if (!target || active_applet_index[h] != indices[h]) return;
+          applet_data[h] = values[h];
+          target->OnDataReceive(applet_data[h]);
         }
 
         // clock data
-        if (!PhzConfig::getValue(preset_key | CLOCK_DATA_KEY, clock_data)) return;
+        clock_data = saved_clock;
         ClockSetup_instance.OnDataReceive(clock_data);
         // if the first key exists, we are assuming the rest are present...
 
@@ -395,8 +403,10 @@ public:
         //LoadGlobals();
 
         audio_app.LoadPreset(id);
+        preset_id = id;
         PokePopup(PRESET_POPUP);
-    }
+    if (IiReady()) transition.Complete();
+  }
     void LoadGlobals() {
         // applet filtering
         PhzConfig::getValue(FILTERMASK1_KEY, HS::hidden_applets[0]);
@@ -479,17 +489,21 @@ public:
 
     // does not modify the preset, only the current state
     void SetApplet(HEM_SIDE hemisphere, int index) {
-        /*noInterrupts();*/
+    phz::ii::Transition transition(false);
+        if (hemisphere < 0 || hemisphere >= APPLET_SLOTS ||
+            index < 0 || index >= HS::HEMISPHERE_AVAILABLE_APPLETS) return;
         HemisphereApplet* next_ = HS::get_applet(index, hemisphere);
+        if (!next_) return;
         HemisphereApplet* old_ = active_applet[hemisphere];
         next_->BaseStart(hemisphere);
         // make sure we've called Start before changing the shared pointer
         active_applet[hemisphere] = next_;
         // unload previous applet after swapping
-        if (old_) old_->Unload();
+        if (old_ && old_ != next_) old_->Unload();
         next_applet_index[hemisphere] = active_applet_index[hemisphere] = index;
-        /*interrupts();*/
-    }
+
+    transition.Complete();
+  }
     void ChangeApplet(HEM_SIDE h, int dir) {
         int index = HS::get_next_applet_index(next_applet_index[h], dir);
         next_applet_index[h] = index;
@@ -696,93 +710,7 @@ public:
       }
     }
 
-    void View() const {
-        bool draw_applets = true;
-
-        if (preset_cursor) {
-          DrawPresetSelector();
-          draw_applets = false;
-        }
-        else if (config_page > HIDE_CONFIG) {
-          switch(config_page) {
-          default:
-          case LOADSAVE_POPUP:
-            PokePopup(MENU_POPUP);
-            // but still draw the applets
-            break;
-
-          case MIDI_MAPS_PAGE:
-            DrawMidiMaps(config_cursor - MIDIMAP1);
-            draw_applets = false;
-            break;
-
-          case INPUT_SETTINGS:
-            DrawInputMappings();
-            draw_applets = false;
-            break;
-
-          case QUANTIZER_SETTINGS:
-            DrawQuantizerConfig();
-            draw_applets = false;
-            break;
-
-          case CONFIG_SETTINGS:
-            DrawConfigMenu();
-            draw_applets = false;
-            break;
-
-          case SHOWHIDE_APPLETS:
-            DrawAppletList();
-            draw_applets = false;
-            break;
-          }
-        }
-        if (HS::q_edit)
-          PokePopup(QUANTIZER_POPUP);
-        else if (HS::midi_edit)
-          PokePopup(MIDI_POPUP);
-
-        if (draw_applets) {
-          if (view_state == AUDIO_SETUP) {
-            audio_app.View();
-
-            draw_applets = false;
-          }
-        }
-
-        if (draw_applets) {
-          if (view_state == APPLET_FULLSCREEN) {
-            DrawFullScreen();
-          } else if (view_state == OVERVIEW) {
-            DrawOverview();
-          } else {
-            // only two applets visible at a time
-            for (int h = 0; h < 2; h++)
-            {
-                HEM_SIDE slot = HEM_SIDE(h + view_slot[h]*2);
-                active_applet[slot]->BaseView();
-
-                // Applets 3 and 4 get inverted titles
-                if (slot > 1) gfxInvert(0 + h*64, 0, 63, 10);
-            }
-
-            // vertical separator
-            graphics.drawLine(63, 0, 63, 63, 2);
-          }
-        }
-
-        // Clock setup is an overlay
-        if (clock_overlay) {
-          ClockSetup_instance.View();
-        } else {
-          ClockSetup_instance.DrawIndicator(view_state == OVERVIEW);
-        }
-
-        // Overlay popup window last
-        if (OC::CORE::ticks - HS::popup_tick < HEMISPHERE_CURSOR_TICKS * 4) {
-          HS::DrawPopup(config_cursor, preset_id, CursorBlink());
-        }
-    }
+    FLASHMEM __attribute__((noinline)) void View() const;
 
     // always act-on-press for encoder
     void DelegateEncoderPush(const UI::Event &event) {
@@ -1078,8 +1006,8 @@ private:
     uint8_t bank_num = 0;
     int queued_preset = -1;
     int preset_cursor = 0;
-    HemisphereApplet *active_applet[4]; // Pointers to actual applets
-    int active_applet_index[4]; // Indexes to applets
+    HemisphereApplet *active_applet[4]{}; // Pointers to actual applets
+    int active_applet_index[4]{}; // Indexes to applets
                       // Left side: 0,2
                       // Right side: 1,3
     int next_applet_index[4]; // queued from UI thread, handled by Controller
@@ -1190,160 +1118,9 @@ private:
         MAX_CURSOR = MIDIMAP32
     };
 
-    void Randomizer(bool audio = false) {
-      static uint8_t cycle = 0;
+    FLASHMEM __attribute__((noinline)) void Randomizer(bool audio = false);
 
-      if (audio) audio_app.ReInit();
-
-      switch (cycle) {
-        case 0:
-          // randomize all applets
-          for (int ch = 0; ch < APPLET_SLOTS; ++ch) {
-            size_t index = random(HEMISPHERE_AVAILABLE_APPLETS);
-            SetApplet(HEM_SIDE(ch), index);
-#ifdef PEWPEWPEW
-            // load random data !!!
-            // this will expose critical bugs in data validation ;)
-            HS::get_applet(index, ch)->OnDataReceive(uint64_t(random()) << 32 | (uint64_t)random());
-#endif
-          }
-          PokePopup(HS::MESSAGE_POPUP, "Reset/Random");
-          break;
-        case 3:
-          // oops all LFOs
-          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(7)); // Ebb&LFO
-          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(89)); // Relabi
-          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(49)); // VectorLFO
-          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(49)); // VectorLFO
-          PokePopup(HS::MESSAGE_POPUP, "LFOs!");
-          break;
-        case 2:
-          // oops all envelopes
-          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(8)); // ADSR
-          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(52)); // VectorEG
-          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(8)); // ADSR
-          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(52)); // VectorEG
-          PokePopup(HS::MESSAGE_POPUP, "Envelopes!");
-          break;
-        case 1:
-          // oops all quantizers
-          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(9)); // DualQuant
-          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(9)); // DualQuant
-          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(46)); // Squanch
-          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(46)); // Squanch
-          PokePopup(HS::MESSAGE_POPUP, "Quantizers!");
-          break;
-        case 4:
-          // oops all sequencers
-          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(14)); // SeqX
-          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(60)); // TB-3PO
-          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(58)); // Shredder
-          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(18)); // TwoRings
-          PokePopup(HS::MESSAGE_POPUP, "Sequencers!");
-          break;
-        case 5:
-          // oops all clocks
-          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(6)); // ClockDiv
-          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(50)); // Metronome
-          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(72)); // PolyDiv
-          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(15)); // EuclidX
-          PokePopup(HS::MESSAGE_POPUP, "Clocks!");
-          break;
-      }
-
-      ++cycle %= 6;
-    }
-
-    void ConfigEncoderAction(int h, int dir) {
-        if (!isEditing && !preset_cursor) {
-          if (h == 0) { // change pages
-            config_page += dir;
-            config_page = constrain(config_page, LOADSAVE_POPUP, LAST_PAGE);
-
-            const int cursorpos[] = { 0, LOAD_PRESET, TRIG_LENGTH, TRIGMAP1, QUANT1, MIDIMAP1, SHOWHIDELIST };
-            config_cursor = cursorpos[config_page];
-          } else if (config_page == SHOWHIDE_APPLETS) {
-            showhide_cursor.Scroll(dir);
-          } else { // move cursor
-            config_cursor = constrain(config_cursor + dir, LOAD_PRESET, MAX_CURSOR);
-
-            SetConfigPageFromCursor();
-          }
-          ResetCursor();
-          if (config_cursor > RANDOMIZE_PRESET) HS::popup_tick = 0;
-          return;
-        }
-
-        if (preset_cursor && isEditing) {
-          // bank select
-          bank_num = constrain(bank_num + dir, 0, 99);
-          return;
-        }
-
-        switch (config_cursor) {
-        case TRIGMAP1:
-        case TRIGMAP2:
-        case TRIGMAP3:
-        case TRIGMAP4:
-            if (!EditSelectedInputMap(dir))
-              HS::trigmap[config_cursor-TRIGMAP1].ChangeSource(dir);
-            break;
-        case CVMAP1:
-        case CVMAP2:
-        case CVMAP3:
-        case CVMAP4:
-            if (!EditSelectedInputMap(dir))
-              HS::cvmap[config_cursor-CVMAP1].ChangeSource(dir);
-            break;
-        case TRIGMAP5:
-        case TRIGMAP6:
-        case TRIGMAP7:
-        case TRIGMAP8:
-            if (!EditSelectedInputMap(dir))
-              HS::trigmap[config_cursor-TRIGMAP5 + 4].ChangeSource(dir);
-            break;
-        case CVMAP5:
-        case CVMAP6:
-        case CVMAP7:
-        case CVMAP8:
-            if (!EditSelectedInputMap(dir))
-              HS::cvmap[config_cursor-CVMAP5 + 4].ChangeSource(dir);
-            break;
-
-        case TRIG_LENGTH:
-            HS::trig_length = (uint32_t) constrain( int(HS::trig_length + dir), 1, 127);
-            break;
-        case PRESET_JUMP_TRIG:
-            if (!EditSelectedInputMap(dir))
-              jump_trig_.ChangeSource(dir);
-            break;
-        case MIDI_BEND_RANGE:
-            HS::frame.MIDIState.bend_range =
-              constrain(HS::frame.MIDIState.bend_range + dir, 0, 36);
-            break;
-        case MIDI_PC_CHANNEL:
-            HS::frame.MIDIState.pc_channel =
-              constrain(HS::frame.MIDIState.pc_channel + dir, 0, 17);
-            break;
-        case MIDI_POLY_MODE:
-            HS::frame.MIDIState.poly_mode =
-              constrain(HS::frame.MIDIState.poly_mode + dir, 0, HS::MIDIPolyMode::POLY_LAST);
-            break;
-        case SCREENSAVER_MODE:
-            HS::screensaver_mode = constrain(HS::screensaver_mode + dir, 0, SCREENSAVER_MODE_COUNT - 1);
-            break;
-
-        case DELETE_PRESET:
-        case LOAD_PRESET:
-        case SAVE_PRESET:
-            if (h == 0) {
-              config_cursor = constrain(config_cursor + dir, DELETE_PRESET, SAVE_PRESET);
-            } else {
-              preset_cursor = constrain(preset_cursor + dir, 1, QUAD_PRESET_COUNT);
-            }
-            break;
-        }
-    }
+    FLASHMEM __attribute__((noinline)) void ConfigEncoderAction(int h, int dir);
     void ConfigButtonPush(int h) {
       static uint8_t old_bank_num = 0xff;
         if (preset_cursor) {
@@ -2002,3 +1779,291 @@ FLASHMEM
 void AppQuadrants::LoadFromPreset(int id) {
   load_from_preset(id);
 }
+
+// Cold UI/bank routines are out-of-class so FLASHMEM is honored by the linker.
+FLASHMEM void AppQuadrants::SetBank(uint8_t id) {
+    phz::ii::Transition transition(false);
+      bank_filename[5] = '0' + char(id / 100);
+      bank_filename[6] = '0' + char(id / 10 % 10);
+      bank_filename[7] = '0' + char(id % 10);
+
+      bool success = false;
+      if (SDcard_Ready) // load from SD card
+        success = PhzConfig::load_config(bank_filename, SD);
+
+      if (!success) // fallback load from LFS
+        success = PhzConfig::load_config(bank_filename);
+
+      LoadGlobals();
+
+      // Version flag - for future reconfigurations...
+      //  - This can be used to migrate old data after breaking changes to the schema
+      //  - Right now, its existence indicates v1.10.1+
+      uint64_t data = 0;
+      bool version_key_present = PhzConfig::getValue(VERSION_KEY, data);
+      int preset_file_revision = version_key_present? data : 0;
+
+      // Data migration to protect against a bug in v1.10
+      // This can be removed later, when we're sure no one is still using broken preset files...
+      if (!version_key_present) {
+        for (size_t i = 0; i < QUAD_PRESET_COUNT; ++i) {
+          PhzConfig::deleteKey((i << 11) | (CVMAP_KEY + 1));
+          PhzConfig::deleteKey((i << 11) | (TRIGMAP_KEY + 1));
+        }
+      }
+      if (preset_file_revision < 1) {
+        // migrations from v1.x to v2.0 go here
+        // these are handled elsewhere in Unpack() functions:
+        // - CVInputMap sources got remapped
+        // - MIDI Map functions got remapped
+      }
+
+      // update version key after all data migrations
+      PhzConfig::setValue(VERSION_KEY, PRESET_FILE_REVISION);
+    if (success) transition.Complete();
+  }
+FLASHMEM void AppQuadrants::Randomizer(bool audio) {
+    // Only the full standard+audio reset can recover a failed audio restore.
+    phz::ii::Transition transition(audio);
+      static uint8_t cycle = 0;
+
+      if (audio) audio_app.ReInit();
+
+      switch (cycle) {
+        case 0:
+          // randomize all applets
+          for (int ch = 0; ch < APPLET_SLOTS; ++ch) {
+            size_t index = random(HEMISPHERE_AVAILABLE_APPLETS);
+            SetApplet(HEM_SIDE(ch), index);
+#ifdef PEWPEWPEW
+            // load random data !!!
+            // this will expose critical bugs in data validation ;)
+            HS::get_applet(index, ch)->OnDataReceive(uint64_t(random()) << 32 | (uint64_t)random());
+#endif
+          }
+          PokePopup(HS::MESSAGE_POPUP, "Reset/Random");
+          break;
+        case 3:
+          // oops all LFOs
+          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(7)); // Ebb&LFO
+          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(89)); // Relabi
+          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(49)); // VectorLFO
+          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(49)); // VectorLFO
+          PokePopup(HS::MESSAGE_POPUP, "LFOs!");
+          break;
+        case 2:
+          // oops all envelopes
+          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(8)); // ADSR
+          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(52)); // VectorEG
+          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(8)); // ADSR
+          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(52)); // VectorEG
+          PokePopup(HS::MESSAGE_POPUP, "Envelopes!");
+          break;
+        case 1:
+          // oops all quantizers
+          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(9)); // DualQuant
+          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(9)); // DualQuant
+          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(46)); // Squanch
+          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(46)); // Squanch
+          PokePopup(HS::MESSAGE_POPUP, "Quantizers!");
+          break;
+        case 4:
+          // oops all sequencers
+          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(14)); // SeqX
+          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(60)); // TB-3PO
+          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(58)); // Shredder
+          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(18)); // TwoRings
+          PokePopup(HS::MESSAGE_POPUP, "Sequencers!");
+          break;
+        case 5:
+          // oops all clocks
+          SetApplet(HEM_SIDE(0), HS::get_applet_index_by_id(6)); // ClockDiv
+          SetApplet(HEM_SIDE(1), HS::get_applet_index_by_id(50)); // Metronome
+          SetApplet(HEM_SIDE(2), HS::get_applet_index_by_id(72)); // PolyDiv
+          SetApplet(HEM_SIDE(3), HS::get_applet_index_by_id(15)); // EuclidX
+          PokePopup(HS::MESSAGE_POPUP, "Clocks!");
+          break;
+      }
+
+      ++cycle %= 6;
+    if (IiReady()) transition.Complete();
+  }
+FLASHMEM void AppQuadrants::ConfigEncoderAction(int h, int dir) {
+        if (!isEditing && !preset_cursor) {
+          if (h == 0) { // change pages
+            config_page += dir;
+            config_page = constrain(config_page, LOADSAVE_POPUP, LAST_PAGE);
+
+            const int cursorpos[] = { 0, LOAD_PRESET, TRIG_LENGTH, TRIGMAP1, QUANT1, MIDIMAP1, SHOWHIDELIST };
+            config_cursor = cursorpos[config_page];
+          } else if (config_page == SHOWHIDE_APPLETS) {
+            showhide_cursor.Scroll(dir);
+          } else { // move cursor
+            config_cursor = constrain(config_cursor + dir, LOAD_PRESET, MAX_CURSOR);
+
+            SetConfigPageFromCursor();
+          }
+          ResetCursor();
+          if (config_cursor > RANDOMIZE_PRESET) HS::popup_tick = 0;
+          return;
+        }
+
+        if (preset_cursor && isEditing) {
+          // bank select
+          bank_num = constrain(bank_num + dir, 0, 99);
+          return;
+        }
+
+        switch (config_cursor) {
+        case TRIGMAP1:
+        case TRIGMAP2:
+        case TRIGMAP3:
+        case TRIGMAP4:
+            if (!EditSelectedInputMap(dir))
+              HS::trigmap[config_cursor-TRIGMAP1].ChangeSource(dir);
+            break;
+        case CVMAP1:
+        case CVMAP2:
+        case CVMAP3:
+        case CVMAP4:
+            if (!EditSelectedInputMap(dir))
+              HS::cvmap[config_cursor-CVMAP1].ChangeSource(dir);
+            break;
+        case TRIGMAP5:
+        case TRIGMAP6:
+        case TRIGMAP7:
+        case TRIGMAP8:
+            if (!EditSelectedInputMap(dir))
+              HS::trigmap[config_cursor-TRIGMAP5 + 4].ChangeSource(dir);
+            break;
+        case CVMAP5:
+        case CVMAP6:
+        case CVMAP7:
+        case CVMAP8:
+            if (!EditSelectedInputMap(dir))
+              HS::cvmap[config_cursor-CVMAP5 + 4].ChangeSource(dir);
+            break;
+
+        case TRIG_LENGTH:
+            HS::trig_length = (uint32_t) constrain( int(HS::trig_length + dir), 1, 127);
+            break;
+        case PRESET_JUMP_TRIG:
+            if (!EditSelectedInputMap(dir))
+              jump_trig_.ChangeSource(dir);
+            break;
+        case MIDI_BEND_RANGE:
+            HS::frame.MIDIState.bend_range =
+              constrain(HS::frame.MIDIState.bend_range + dir, 0, 36);
+            break;
+        case MIDI_PC_CHANNEL:
+            HS::frame.MIDIState.pc_channel =
+              constrain(HS::frame.MIDIState.pc_channel + dir, 0, 17);
+            break;
+        case MIDI_POLY_MODE:
+            HS::frame.MIDIState.poly_mode =
+              constrain(HS::frame.MIDIState.poly_mode + dir, 0, HS::MIDIPolyMode::POLY_LAST);
+            break;
+        case SCREENSAVER_MODE:
+            HS::screensaver_mode = constrain(HS::screensaver_mode + dir, 0, SCREENSAVER_MODE_COUNT - 1);
+            break;
+
+        case DELETE_PRESET:
+        case LOAD_PRESET:
+        case SAVE_PRESET:
+            if (h == 0) {
+              config_cursor = constrain(config_cursor + dir, DELETE_PRESET, SAVE_PRESET);
+            } else {
+              preset_cursor = constrain(preset_cursor + dir, 1, QUAD_PRESET_COUNT);
+            }
+            break;
+        }
+    }
+
+// Display work runs from the UI loop, not the control/command critical path.
+FLASHMEM void AppQuadrants::View() const {
+        bool draw_applets = true;
+
+        if (preset_cursor) {
+          DrawPresetSelector();
+          draw_applets = false;
+        }
+        else if (config_page > HIDE_CONFIG) {
+          switch(config_page) {
+          default:
+          case LOADSAVE_POPUP:
+            PokePopup(MENU_POPUP);
+            // but still draw the applets
+            break;
+
+          case MIDI_MAPS_PAGE:
+            DrawMidiMaps(config_cursor - MIDIMAP1);
+            draw_applets = false;
+            break;
+
+          case INPUT_SETTINGS:
+            DrawInputMappings();
+            draw_applets = false;
+            break;
+
+          case QUANTIZER_SETTINGS:
+            DrawQuantizerConfig();
+            draw_applets = false;
+            break;
+
+          case CONFIG_SETTINGS:
+            DrawConfigMenu();
+            draw_applets = false;
+            break;
+
+          case SHOWHIDE_APPLETS:
+            DrawAppletList();
+            draw_applets = false;
+            break;
+          }
+        }
+        if (HS::q_edit)
+          PokePopup(QUANTIZER_POPUP);
+        else if (HS::midi_edit)
+          PokePopup(MIDI_POPUP);
+
+        if (draw_applets) {
+          if (view_state == AUDIO_SETUP) {
+            audio_app.View();
+
+            draw_applets = false;
+          }
+        }
+
+        if (draw_applets) {
+          if (view_state == APPLET_FULLSCREEN) {
+            DrawFullScreen();
+          } else if (view_state == OVERVIEW) {
+            DrawOverview();
+          } else {
+            // only two applets visible at a time
+            for (int h = 0; h < 2; h++)
+            {
+                HEM_SIDE slot = HEM_SIDE(h + view_slot[h]*2);
+                active_applet[slot]->BaseView();
+
+                // Applets 3 and 4 get inverted titles
+                if (slot > 1) gfxInvert(0 + h*64, 0, 63, 10);
+            }
+
+            // vertical separator
+            graphics.drawLine(63, 0, 63, 63, 2);
+          }
+        }
+
+        // Clock setup is an overlay
+        if (clock_overlay) {
+          ClockSetup_instance.View();
+        } else {
+          ClockSetup_instance.DrawIndicator(view_state == OVERVIEW);
+        }
+
+        // Overlay popup window last
+        if (OC::CORE::ticks - HS::popup_tick < HEMISPHERE_CURSOR_TICKS * 4) {
+          HS::DrawPopup(config_cursor, preset_id, CursorBlink());
+        }
+    }

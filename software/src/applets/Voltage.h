@@ -21,6 +21,7 @@
 
 class Voltage : public HemisphereApplet {
 public:
+    phz::parameters::Schema Parameters() const override;
 
   static constexpr int VOLTAGE_INCREMENTS = 128;
   #define VOLTAGE_MIN (HEMISPHERE_MIN_CV / VOLTAGE_INCREMENTS)
@@ -69,9 +70,9 @@ public:
         uint8_t ch = cursor / 2;
         if (cursor == 0 || cursor == 2) {
             // Change voltage
-            voltage[ch] = constrain(voltage[ch] + direction, VOLTAGE_MIN, VOLTAGE_MAX);
+            AdjustParameterNative(ch ? 3 : 1, direction);
         } else {
-            gate[ch] = 1 - gate[ch];
+            SetParameterNative(ch ? 4 : 2, !gate[ch]);
         }
     }
 
@@ -109,6 +110,12 @@ protected:
     }
 
 private:
+    static bool ParameterRange(const phz::parameters::Owner&, phz::parameters::Domain& d) {
+      d.minimum = VOLTAGE_MIN; d.maximum = VOLTAGE_MAX;
+      // Voltage range is a live firmware setting, not a universal fixed span.
+      d.dependencies = (uint64_t(uint32_t(d.minimum)) << 32) | uint32_t(d.maximum);
+      return d.minimum <= d.maximum;
+    }
     int cursor;
     bool view[2];
 
@@ -132,3 +139,16 @@ private:
     }
 
 };
+
+phz::parameters::Schema Voltage::Parameters() const {
+  using namespace phz::parameters;
+  // Stable public IDs/semantic keys; labels and UI order are independent.
+  static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {
+    []() constexpr { auto e = Field<Voltage, &Voltage::voltage, 0>::Make(1, "voltage[0]", "Voltage 1", "semitone", INT32_MIN, INT32_MAX); e.describe = ParameterRange; return e; }(),
+    Field<Voltage, &Voltage::gate, 0>::Make(2, "gate[0]", "Gate polarity 1", "boolean", 0, 1),
+    []() constexpr { auto e = Field<Voltage, &Voltage::voltage, 1>::Make(3, "voltage[1]", "Voltage 2", "semitone", INT32_MIN, INT32_MAX); e.describe = ParameterRange; return e; }(),
+    Field<Voltage, &Voltage::gate, 1>::Make(4, "gate[1]", "Gate polarity 2", "boolean", 0, 1),
+  };
+  static_assert(Valid(entries), "Invalid applet parameter schema");
+  return {entries, sizeof(entries) / sizeof(entries[0])};
+}

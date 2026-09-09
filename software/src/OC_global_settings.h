@@ -27,6 +27,9 @@
 #define OC_GLOBAL_SETTINGS_H_
 
 #include "OC_DAC.h"
+#if defined(ARDUINO_TEENSY41)
+#include "ii/AddressState.h"
+#endif
 #include "OC_chords.h"
 #include "OC_scales.h"
 #include "OC_patterns.h"
@@ -57,6 +60,9 @@ public:
   uint16_t current_app_id;
 
   bool valid = false; // added in v2.0
+#if defined(ARDUINO_TEENSY41)
+  phz::ii::AddressState ii_address;
+#endif
 
   // TODO[PLD] We should be able to use these structs directly to save space
   Scale user_scales[Scales::SCALE_USER_COUNT];

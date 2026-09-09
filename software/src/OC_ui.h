@@ -81,6 +81,9 @@ public:
   bool ConfirmReset();
   void DebugStats();
   bool AppSettings(bool drawmenu);
+#if defined(ARDUINO_TEENSY41)
+  void IiSettings();
+#endif
   UiMode DispatchEvents(const RuntimeSlot &appslot);
 
   void Poll();

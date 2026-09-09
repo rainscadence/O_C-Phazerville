@@ -32,6 +32,10 @@
 #define _HEM_APPLET_H_
 
 #include "OC_core.h"
+#include "ii/SettingsBridge.h"
+#if defined(ARDUINO_TEENSY41)
+#include "ii/InterruptLock.h"
+#endif
 
 #include "OC_digital_inputs.h"
 #include "OC_DAC.h"
@@ -89,7 +93,7 @@ struct EncoderEditor {
 
 static constexpr bool ALWAYS_SHOW_ICONS = false;
 
-class HemisphereApplet {
+class HemisphereApplet : public phz::parameters::Owner {
 public:
     static int cursor_countdown[APPLET_CURSOR_COUNT];
     static int16_t cursor_start_x;
@@ -111,6 +115,33 @@ public:
     virtual void OnButtonPress() { CursorToggle(); };
     virtual void OnEncoderMove(int direction) = 0;
     virtual void Unload() { }
+    // Immutable descriptor snapshot; no allocation, I/O or lifecycle changes.
+    virtual bool DescribeIiParameter(uint16_t id, phz::ii::Descriptor& out) const {
+      return phz::ii::DescribeSettings(*this, id, out);
+    }
+    // Absolute setter, including final dependency validation. False = no mutation.
+    virtual bool ApplyIiParameter(uint16_t id, int32_t value, uint64_t dependencies) {
+      return phz::ii::ApplySettings(*this, id, value, dependencies);
+    }
+    // Local controls reuse the same native validation/setter as ii.
+    bool SetParameterNative(uint16_t id, int32_t value) {
+#if defined(ARDUINO_TEENSY41)
+      phz::ii::InterruptLock lock;
+#endif
+      phz::parameters::Domain d;
+      return DescribeParameter(id, d) && SetParameter(id, value, d.dependencies);
+    }
+    bool AdjustParameterNative(uint16_t id, int direction) {
+#if defined(ARDUINO_TEENSY41)
+      phz::ii::InterruptLock lock;
+#endif
+      phz::parameters::Domain d; int32_t old;
+      if (!DescribeParameter(id, d) || d.kind != phz::parameters::Kind::Integer ||
+          !ReadParameter(id, old)) return false;
+      const int64_t sum = int64_t(old) + direction;
+      const int32_t value = sum < d.minimum ? d.minimum : sum > d.maximum ? d.maximum : int32_t(sum);
+      return SetParameter(id, value, d.dependencies);
+    }
     virtual void DrawFullScreen() {
       View();
       graphics.drawBitmap8(96 - (hemisphere & 1)*64, 28, 8, (hemisphere & 1) ? RIGHT_ICON : LEFT_ICON);

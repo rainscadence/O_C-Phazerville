@@ -25,6 +25,8 @@
 #include "OC_scales.h"
 #include "OC_ui.h"
 #include "OC_apps.h"
+#include "ii/Lifecycle.h"
+#include "ii/Follower.h"
 #include "OC_menus.h"
 #include "OC_config.h"
 #include "OC_digital_inputs.h"
@@ -54,6 +56,9 @@
 #include "util/util_pagestorage.h"
 #include "src/drivers/EEPROMStorage.h"
 #include "PhzConfig.h"
+#if defined(ARDUINO_TEENSY41)
+#include "ii/Configuration.h"
+#endif
 #include "VBiasManager.h"
 #include "HSClockManager.h"
 
@@ -103,12 +108,22 @@ enum GlobalSettingsDataKeys : uint16_t {
 #endif
 
 FLASHMEM
-static void SaveGlobalSettings() {
+static bool SaveGlobalSettings(bool factory = false) {
   APPS_SERIAL_PRINTLN("Save global settings");
 
 #ifdef __IMXRT1062__
-  //PhzConfig::clear_config();
-  PhzConfig::load_config(); // use default config file
+  PhzConfig::ScopedContext globals;
+  if (!factory && !PhzConfig::load_config()) {
+    HS::PokePopup(HS::MESSAGE_POPUP, "Globals invalid");
+    return false;
+  }
+#if defined(ARDUINO_TEENSY41)
+  if (factory) {
+    uint64_t record = 0;
+    if (!global_settings.ii_address.PendingRecord(record)) return false;
+    PhzConfig::setValue(phz::ii::kSettingsKey, record);
+  }
+#endif
 
   // Metadata
   uint64_t data = 0;
@@ -206,7 +221,7 @@ static void SaveGlobalSettings() {
   }
   */
 
-  PhzConfig::save_config(); // save to default config file
+  return PhzConfig::save_config(); // verified replacement, no live rebind
 #else // --- Teensy 3.2
   memcpy(global_settings.user_scales, OC::user_scales, sizeof(OC::user_scales));
   memcpy(global_settings.user_patterns, OC::user_patterns, sizeof(OC::user_patterns));
@@ -237,6 +252,7 @@ static void SaveGlobalSettings() {
 
   global_settings_storage.Save(global_settings);
   APPS_SERIAL_PRINTLN("Saved global settings: page_index %d", global_settings_storage.page_index());
+  return true;
 #endif
 }
 
@@ -254,7 +270,7 @@ static_assert(totalsize < OC::AppData::kAppDataSize, "EEPROM Allocation Exceeded
 */
 
 FLASHMEM void SaveAppData() {
-  SaveGlobalSettings(); // yeah, why not
+  if (!SaveGlobalSettings()) return; // never continue after failed globals save
   APPS_SERIAL_PRINTLN("Save app data... (%u bytes available)", OC::AppData::kAppDataSize);
 
   app_data.used = 0;
@@ -353,16 +369,21 @@ static void RestoreAppData() {
 FLASHMEM
 void AppSwitcher::set_current_app(size_t index)
 {
+  phz::ii::SetHostActive(false);
+  phz::ii::Transition transition;
   current_app_ = app_container[index];
   global_settings.current_app_id = current_app_.id();
   #ifdef VOR
   VBiasManager *vbias_m = vbias_m->get();
   vbias_m->SetStateForApp(current_app_);
   #endif
+  transition.Complete();
 }
 
 FLASHMEM
 void AppSwitcher::Init(bool reset_settings) {
+  phz::ii::SetHostActive(false);
+  phz::ii::Transition transition(true);
 
   APPS_SERIAL_PRINTLN("Init");
   app_container.for_each([](RuntimeSlot app) {
@@ -389,6 +410,9 @@ void AppSwitcher::Init(bool reset_settings) {
   global_settings.current_app_id = DEFAULT_APP_ID;
   memset(HS::user_turing_machines, 0, sizeof(HS::user_turing_machines));
 
+  PhzConfig::ScopedContext globals;
+  const bool globals_valid = PhzConfig::load_config();
+  global_settings.valid = false;
   uint64_t data = 0;
   // check metadata for validity
   if (PhzConfig::getValue(METADATA_KEY, data)) {
@@ -401,8 +425,16 @@ void AppSwitcher::Init(bool reset_settings) {
     //OC::DAC::restore_scaling(global_settings.DAC_scaling);
   }
 
+#if defined(ARDUINO_TEENSY41)
+  uint64_t ii_record = 0;
+  const bool ii_present = PhzConfig::getValue(phz::ii::kSettingsKey, ii_record);
+  global_settings.ii_address.Boot(globals_valid && global_settings.valid,
+                                  ii_present, ii_record);
+#endif
+
   if (reset_settings || !global_settings.valid) {
     if (ui.ConfirmReset()) {
+      reset_settings = true; // do not restore the pre-reset maps afterward
       APPS_SERIAL_PRINTLN("Erase EEPROM ...");
       EEPtr d = EEPROM_GLOBALSETTINGS_START;
       size_t len = EEPROMStorage::LENGTH - EEPROM_GLOBALSETTINGS_START;
@@ -416,8 +448,18 @@ void AppSwitcher::Init(bool reset_settings) {
       global_settings_storage.Init();
 #endif
       app_data_storage.Init();
+      // This branch is reached only after explicit factory-reset approval.
+      PhzConfig::clear_config();
       global_settings.valid = true;
-      SaveGlobalSettings();
+#if defined(ARDUINO_TEENSY41)
+      global_settings.ii_address.FactoryDefaults();
+#endif
+      if (!SaveGlobalSettings(true)) {
+        global_settings.valid = false;
+#if defined(ARDUINO_TEENSY41)
+        global_settings.ii_address.Boot(false, false, 0);
+#endif
+      }
     } else {
       reset_settings = false;
     }
@@ -608,6 +650,7 @@ void AppSwitcher::Init(bool reset_settings) {
   ui.encoders_enable_acceleration(global_settings.encoders_enable_acceleration);
 
   set_current_app(current_app_index);
+  transition.Complete();
 
   delay(100);
 }
@@ -625,13 +668,19 @@ void draw_save_message(uint8_t c) {
 FLASHMEM
 bool Ui::AppSettings(bool drawmenu) {
   static menu::ScreenCursor<5> cursor;
+  const int app_count = app_container.num_apps();
+#if defined(ARDUINO_TEENSY41)
+  const int menu_count = app_count + 1;
+#else
+  const int menu_count = app_count;
+#endif
   static bool change_app = false;
   static bool save = false;
   static bool opened = false;
 
   // --- state change: entering App Menu
   if (!opened) {
-    cursor.Init(0, app_container.num_apps() - 1);
+    cursor.Init(0, menu_count - 1);
     cursor.Scroll(app_container.IndexOfAppByID(global_settings.current_app_id));
     opened = true;
   }
@@ -647,7 +696,7 @@ bool Ui::AppSettings(bool drawmenu) {
     item.y = (64 - (5 * menu::kMenuLineH)) / 2;
 
     for (int current = max(cursor.first_visible(), 0);
-         current <= cursor.last_visible() && current < (int)app_container.num_apps();
+         current <= cursor.last_visible() && current < menu_count;
          ++current, item.y += menu::kMenuLineH) {
       item.selected = current == cursor.cursor_pos();
       item.SetPrintPos();
@@ -656,8 +705,9 @@ bool Ui::AppSettings(bool drawmenu) {
       // if (your_mom_is_boring)
       //   graphics.print(app_container[current]->boring_name());
       // else
-      graphics.print(app_container[current].name());
-      if (global_settings.current_app_id == app_container[current].id())
+      if (current == app_count) graphics.print("ii address...");
+      else graphics.print(app_container[current].name());
+      if (current < app_count && global_settings.current_app_id == app_container[current].id())
         graphics.drawBitmap8(0, item.y + 1, 8, ZAP_ICON);
 
       item.DrawCustom();
@@ -685,6 +735,12 @@ bool Ui::AppSettings(bool drawmenu) {
         break;
 
       case CONTROL_BUTTON_R:
+#if defined(ARDUINO_TEENSY41)
+        if (cursor.cursor_pos() == app_count) {
+          if (UI::EVENT_BUTTON_PRESS == event.type) IiSettings();
+          break;
+        }
+#endif
         save = event.type == UI::EVENT_BUTTON_LONG_PRESS;
         change_app = event.type != UI::EVENT_BUTTON_DOWN; // true on button release
         break;
@@ -750,6 +806,53 @@ bool Ui::AppSettings(bool drawmenu) {
   return false; // close menu
 }
 
+#if defined(ARDUINO_TEENSY41)
+bool SaveIiAddress() {
+  const bool was_enabled = CORE::app_isr_enabled;
+  CORE::app_isr_enabled = false;
+  const bool saved = phz::ii::SaveAddress(PhzConfig::myfs,
+      PhzConfig::CONFIG_FILENAME, global_settings.ii_address);
+  CORE::app_isr_enabled = was_enabled;
+  return saved;
+}
+
+FLASHMEM void Ui::IiSettings() {
+  event_queue_.Flush();
+  SetButtonIgnoreMask();
+  auto& address = global_settings.ii_address;
+  bool done = false;
+  const char* message = "";
+  do {
+    while (event_queue_.available()) {
+      const UI::Event event = event_queue_.PullEvent();
+      if (IgnoreEvent(event)) continue;
+      if (event.control == CONTROL_ENCODER_R && event.type == UI::EVENT_ENCODER) {
+        const int next = int(address.pending()) + event.value;
+        address.Edit(next < 8 ? 8 : (next > 0x77 ? 0x77 : next));
+        message = "";
+      } else if (event.control == CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS) {
+        message = SaveIiAddress() ? "Saved. Reboot to use" : "SAVE FAILED";
+      } else if (event.control == CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
+        done = true;
+      }
+    }
+    GRAPHICS_BEGIN_FRAME(true);
+    graphics.setPrintPos(0, 0); graphics.print("ii follower address");
+    char line[24];
+    if (address.enabled()) snprintf(line, sizeof(line), "Active: 0x%02X", address.active());
+    else snprintf(line, sizeof(line), "Active: OFF (config)");
+    graphics.setPrintPos(0, 12); graphics.print(line);
+    snprintf(line, sizeof(line), "Pending: 0x%02X%s", address.pending(), address.dirty() ? " *" : "");
+    graphics.setPrintPos(0, 24); graphics.print(line);
+    graphics.setPrintPos(0, 36);
+    graphics.print(*message ? message : (address.reboot_required() ? "Reboot required" : "Check bus collisions"));
+    graphics.setPrintPos(0, 54); graphics.print("[Back]        [Save]");
+    GRAPHICS_END_FRAME();
+  } while (!done);
+  event_queue_.Flush(); event_queue_.Poke();
+}
+#endif
+
 FLASHMEM
 bool Ui::ConfirmReset() {
 
@@ -800,3 +903,23 @@ void start_calibration() {
 }
 
 }; // namespace OC
+
+#if defined(ARDUINO_TEENSY41)
+namespace OC {
+namespace {
+class IiBackend final : public phz::ii::Backend {
+ public:
+  bool Describe(const phz::ii::Write& write, phz::ii::Descriptor& out) override {
+    return app_switcher.current_app()->DescribeIi(write, out);
+  }
+  bool Apply(const phz::ii::Prepared& update) override {
+    return app_switcher.current_app()->ApplyIi(update);
+  }
+};
+}
+void ServiceIi() {
+  static IiBackend backend;
+  phz::ii::ServiceFollower(backend);
+}
+}
+#endif

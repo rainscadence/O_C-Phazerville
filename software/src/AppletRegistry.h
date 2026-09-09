@@ -88,7 +88,13 @@ struct Registry {
       return getIcons()[index];
     }
 
+    // Snapshot lookup never constructs an instance or logs under the ii lock.
+    T* peek(size_t index, size_t slot) const {
+        return index < Size && slot < Slots ? instances[slot][index] : nullptr;
+    }
+
     T* get(RegID id, size_t slot = 0) const {
+        if (slot >= Slots) return nullptr;
         int idx = -1;
         auto Ids = getIds();
         for (size_t i = 0; i < Size; ++i) {
@@ -104,7 +110,8 @@ struct Registry {
             Serial.printf("Free RAM: %d\n", OC::CORE::FreeRam());
             Serial.printf("AppletRegistry: new - ID: %u Index: %d Slot: %u\n", id, idx, slot);
             instances[slot][idx] = factories[idx]();
-            Serial.println(instances[slot][idx]->applet_name());
+            if (instances[slot][idx])
+              Serial.println(instances[slot][idx]->applet_name());
         }
         return instances[slot][idx];
     }

@@ -26,6 +26,7 @@
 
 class AttenuateOffset : public HemisphereApplet {
 public:
+    phz::parameters::Schema Parameters() const override;
 
     const char* applet_name() {
         return "AttenOff";
@@ -61,7 +62,7 @@ public:
 
     void OnButtonPress() {
         if (cursor == 4) // special case toggle
-            mix = !mix;
+            SetParameterNative(5, !mix);
         else
             CursorToggle();
     }
@@ -75,12 +76,10 @@ public:
         uint8_t ch = cursor / 2;
         if (cursor == 0 || cursor == 2) {
             // Change offset voltage
-            int min = -HEMISPHERE_MAX_CV / ATTENOFF_INCREMENTS;
-            int max = HEMISPHERE_MAX_CV / ATTENOFF_INCREMENTS;
-            offset[ch] = constrain(offset[ch] + direction, min, max);
+            AdjustParameterNative(ch ? 3 : 1, direction);
         } else {
             // Change level percentage (+/-200%)
-            level[ch] = constrain(level[ch] + direction, -ATTENOFF_MAX_LEVEL*2, ATTENOFF_MAX_LEVEL*2);
+            AdjustParameterNative(ch ? 4 : 2, direction);
         }
     }
 
@@ -119,6 +118,12 @@ protected:
   }
 
 private:
+    static bool ParameterRange(const phz::parameters::Owner&, phz::parameters::Domain& d) {
+      d.minimum = -HEMISPHERE_MAX_CV / ATTENOFF_INCREMENTS; d.maximum = HEMISPHERE_MAX_CV / ATTENOFF_INCREMENTS;
+      // Voltage range is a live firmware setting, not a universal fixed span.
+      d.dependencies = (uint64_t(uint32_t(d.minimum)) << 32) | uint32_t(d.maximum);
+      return d.minimum <= d.maximum;
+    }
     int cursor;
     int level[2];
     int offset[2];
@@ -150,4 +155,19 @@ private:
     }
 
 };
+
+phz::parameters::Schema AttenuateOffset::Parameters() const {
+  using namespace phz::parameters;
+  // Stable public IDs/semantic keys; labels and UI order are independent.
+  static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {
+    []() constexpr { auto e = Field<AttenuateOffset, &AttenuateOffset::offset, 0>::Make(1, "offset[0]", "Offset 1", "semitone", INT32_MIN, INT32_MAX); e.describe = ParameterRange; return e; }(),
+    Field<AttenuateOffset, &AttenuateOffset::level, 0>::Make(2, "level[0]", "Level 1", "1/63 gain", -ATTENOFF_MAX_LEVEL*2, ATTENOFF_MAX_LEVEL*2),
+    []() constexpr { auto e = Field<AttenuateOffset, &AttenuateOffset::offset, 1>::Make(3, "offset[1]", "Offset 2", "semitone", INT32_MIN, INT32_MAX); e.describe = ParameterRange; return e; }(),
+    Field<AttenuateOffset, &AttenuateOffset::level, 1>::Make(4, "level[1]", "Level 2", "1/63 gain", -ATTENOFF_MAX_LEVEL*2, ATTENOFF_MAX_LEVEL*2),
+    Field<AttenuateOffset, &AttenuateOffset::mix>::Make(5, "mix", "Mix", "boolean", 0, 1),
+  };
+  static_assert(Valid(entries), "Invalid applet parameter schema");
+  return {entries, sizeof(entries) / sizeof(entries[0])};
+}
+
 #endif

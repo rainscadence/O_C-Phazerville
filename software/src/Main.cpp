@@ -59,35 +59,15 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial8, MIDI1);
 #include "AudioIO.h"
 #include "usb_desc.h"
 #include "Wire.h"
+#include "ii/Follower.h"
 #ifdef MULTIBOOT
 #include "util/cachedisable.h"
 #endif
 
 FLASHMEM
 void ScanI2C() {
-  noInterrupts();
-
-  Serial.println("...Scanning i2c addresses...");
-  uint8_t error;
-  for (uint8_t address = 1; address < 127; address++) {
-    // The i2c_scanner uses the return value of
-    // the Write.endTransmisstion to see if
-    // a device did acknowledge to the address.
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
-
-    if (error == 0) {
-      Serial.print("I2C device found at address 0x");
-      if (address < 16) Serial.print("0");
-      Serial.println(address, HEX);
-    } else if (error == 4) {
-      Serial.print("Unknown error at address 0x");
-      if (address < 16) Serial.print("0");
-      Serial.println(address, HEX);
-    } //else { Serial.print("Nothing happened at address 0x"); }
-  }
-
-  interrupts();
+  // Never run leader-only transactions on a follower-configured peripheral.
+  Serial.println("I2C scan disabled in ii follower firmware.");
 }
 #endif // ARDUINO_TEENSY41
 
@@ -261,10 +241,6 @@ void setup() {
   OC::calibration_load();
   OC::SetFlipMode(OC::calibration_data.flipcontrols());
 
-#if defined(ARDUINO_TEENSY41)
-  Wire.begin();
-  Wire.setClock(100000);
-#endif
 
   OC::ADC::Init(&OC::calibration_data.adc, OC::calibration_data.flipcontrols());
   OC::ADC::Init_DMA();
@@ -371,6 +347,12 @@ void setup() {
   // initialize apps
   OC::app_switcher.Init(reset_settings || firstrun);
 
+#if defined(ARDUINO_TEENSY41)
+  phz::ii::StartFollower(OC::global_settings.ii_address);
+  if (!OC::global_settings.ii_address.enabled())
+    HS::PokePopup(HS::MESSAGE_POPUP, "ii OFF: config fault");
+#endif
+
   // Welcome splash
   OC::ui.Splashscreen(firstrun, 1);
 
@@ -429,6 +411,9 @@ void FASTRUN loop() {
       app_switcher.current_app()->DispatchLoop();
 
     // Take care of queued tasks
+    #if defined(ARDUINO_TEENSY41)
+    if (OC::CORE::app_loop_enabled) OC::ServiceIi(); // one owned frame per visit
+    #endif
     OC::CORE::FlushTasks();
 
     // UI events
@@ -502,6 +487,16 @@ void FASTRUN loop() {
 
 #if defined(__IMXRT1062__)
 #if defined(ARDUINO_TEENSY41)
+          case 'j': {
+            const auto d = phz::ii::FollowerDiagnostics();
+            // Snapshot is copied under protection; printing is outside it.
+            Serial.printf("ii active=%u fault=%u depth=%u epoch=%lu exhausted=%u queued=%u\n",
+              d.active, d.fault, d.depth, d.epoch, d.exhausted, unsigned(d.queued));
+            Serial.printf("ii applied=%lu serviced=%lu blocked=%lu malformed=%lu unsupported=%lu stale=%lu rejected=%lu overflow=%lu\n",
+              d.counts.applied, d.counts.serviced, d.counts.blocked, d.counts.malformed,
+              d.counts.unsupported, d.counts.stale, d.rejected, d.overflow);
+            break;
+          }
           case 'i':
             ScanI2C();
             break;
@@ -579,5 +574,3 @@ void FASTRUN loop() {
 
   }
 }
-
-

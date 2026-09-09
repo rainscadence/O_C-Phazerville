@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AudioIO.h"
+#include "ii/Lifecycle.h"
 #include "HemisphereAudioApplet.h"
 #include "OC_ui.h"
 #include "PhzConfig.h"
@@ -51,7 +52,40 @@ public:
     stereo = 1; // stereo for top slot
   }
 
+  // Allocation-free snapshot of the selected live target, never lazy get().
+  HemisphereAudioApplet* PeekIiTarget(phz::ii::Slot slot, uint64_t& type) {
+    if (slot.index >= Slots) return nullptr;
+    if (slot.bank == phz::ii::SlotBank::Stereo) {
+      if (!IsStereo(slot.index)) return nullptr;
+      const int ix = selected_stereo_applets[slot.index];
+      if (ix < 0 || size_t(ix) >= NumStereoProcessors) return nullptr;
+      type = stereo_appletIds[ix];
+      return stereo_applets.peek(ix, slot.index);
+    }
+    if (slot.bank != phz::ii::SlotBank::MonoLeft &&
+        slot.bank != phz::ii::SlotBank::MonoRight) return nullptr;
+    if (IsStereo(slot.index)) return nullptr;
+    const size_t side = slot.bank == phz::ii::SlotBank::MonoRight ? 1 : 0;
+    const int ix = selected_mono_applets[side][slot.index];
+    if (ix < 0 || size_t(ix) >= NumMonoProcessors) return nullptr;
+    type = mono_appletIds[ix];
+    return mono_applets.peek(ix, side * Slots + slot.index);
+  }
+  bool IiReady() {
+    for (uint8_t i = 0; i < Slots; ++i) {
+      uint64_t type;
+      if (IsStereo(i)) {
+        if (!PeekIiTarget({phz::ii::SlotBank::Stereo, i}, type)) return false;
+      } else {
+        if (!PeekIiTarget({phz::ii::SlotBank::MonoLeft, i}, type) ||
+            !PeekIiTarget({phz::ii::SlotBank::MonoRight, i}, type)) return false;
+      }
+    }
+    return true;
+  }
+
   void Init() {
+    phz::ii::Transition transition(false);
     for (size_t slot = 0; slot < Slots; slot++) {
       if (IsStereo(slot)) {
         get_selected_stereo_applet(slot).BaseStart(LEFT_HEMISPHERE);
@@ -65,9 +99,11 @@ public:
     }
     peak_conns[0][0].connect(OC::AudioIO::InputStream(), 0, peaks[0][0], 0);
     peak_conns[1][0].connect(OC::AudioIO::InputStream(), 1, peaks[1][0], 0);
+    if (IiReady()) transition.Complete();
   }
 
   void ReInit() {
+    phz::ii::Transition transition(false);
     stereo |= 1;
     for (size_t slot = 0; slot < Slots; slot++) {
       // reset to defaults here
@@ -81,6 +117,7 @@ public:
         ChangeMonoApplet(side, slot, slot ? 0 : 1); // Input for top slots
       }
     }
+    if (IiReady()) transition.Complete();
   }
 
   void Controller() {
@@ -203,6 +240,8 @@ public:
   }
 
   void SwapMonoStereo(int c) {
+    phz::ii::Transition transition(false);
+    if (c < 0 || c >= Slots) return;
     if (IsStereo(c)) {
       get_selected_stereo_applet(c).BaseStart(HEM_SIDE(LEFT_HEMISPHERE + AUDIO_SLOT_L));
       ForEachSide(side) {
@@ -220,16 +259,20 @@ public:
         if (c > 0) ConnectSlotToNext(side, c - 1);
       }
     }
+    if (IiReady()) transition.Complete();
   }
 
   void HandleEncoderButtonEvent(const UI::Event& event) {
     if (event.mask == (OC::CONTROL_BUTTON_L | OC::CONTROL_BUTTON_R)) {
       // check ready_for_press to suppress double events on button combos
       if (cursor[0] == cursor[1] && ready_for_press) {
+        phz::ii::Transition transition;
         int c = cursor[0];
+        if (c < 0 || c >= Slots) return;
         stereo ^= 1 << c;
 
         SwapMonoStereo(c);
+        if (IiReady()) transition.Complete();
       }
       // Prevent press detection when doing a button combo
       ready_for_press = false;
@@ -266,8 +309,14 @@ public:
   }
 
   void ChangeStereoApplet(HEM_SIDE side, size_t slot, int ix) {
+    phz::ii::Transition transition(false);
+    if (side < 0 || side > 1 || slot >= Slots || ix < 0 ||
+        size_t(ix) >= NumStereoProcessors) return;
     int& sel = selected_stereo_applets[slot];
-    if (ix == sel) return;
+    if (ix == sel) {
+      if (IiReady()) transition.Complete();
+      return;
+    }
     get_selected_stereo_applet(slot).Disconnect();
     get_selected_stereo_applet(slot).Unload();
     sel = ix;
@@ -277,11 +326,18 @@ public:
     if (slot > 0) {
       ForEachSide(side) ConnectSlotToNext(side, slot - 1);
     }
+    if (IiReady()) transition.Complete();
   }
 
   void ChangeMonoApplet(HEM_SIDE side, size_t slot, int ix) {
+    phz::ii::Transition transition(false);
+    if (side < 0 || side > 1 || slot >= Slots || ix < 0 ||
+        size_t(ix) >= NumMonoProcessors) return;
     int& sel = selected_mono_applets[side][slot];
-    if (ix == sel) return;
+    if (ix == sel) {
+      if (IiReady()) transition.Complete();
+      return;
+    }
     get_selected_mono_applet(side, slot).Disconnect();
     get_selected_mono_applet(side, slot).Unload();
     sel = ix;
@@ -289,6 +345,7 @@ public:
     app.BaseStart(HEM_SIDE(side + AUDIO_SLOT_L));
     ConnectMonoToNext(side, slot);
     if (slot > 0) ConnectSlotToNext(side, slot - 1);
+    if (IiReady()) transition.Complete();
   }
 
   void ForwardEncoderMove(HEM_SIDE side, size_t slot, int dir) {
@@ -395,6 +452,8 @@ public:
   }
 
   void LoadPreset(int id) {
+    phz::ii::Transition transition(false);
+    if (id < 0 || id >= 32) return;
     // preset id is upper 5 bits - 32 presets per bank
     uint16_t preset_key = id << 11;
 
@@ -413,6 +472,7 @@ public:
         // stereo applets
         PhzConfig::getValue(preset_key | key(STEREO_APPLETS, slot), data);
         int ix = get_stereo_applet_ix_by_id(slot, data, 0);
+        if (data && stereo_appletIds[ix] != data) return;
         Serial.printf("\n%lu: Loading applet id=", slot);
         Serial.print(data, HEX);
         Serial.printf(" ix=%d", ix);
@@ -435,6 +495,7 @@ public:
           data = 0; // Default to input/passthrough if nothing is found.
           PhzConfig::getValue(preset_key | key(MONO_APPLETS, slot_key), data);
           int ix = get_mono_applet_ix_by_id(ch, slot, data, 0);
+          if (data && mono_appletIds[ix] != data) return;
           Serial.printf("\n%lu, %d: Loading applet id=", slot, ch);
           Serial.print(data, HEX);
           Serial.printf(" ix=%d", ix);
@@ -450,6 +511,7 @@ public:
         }
       }
     }
+    if (IiReady()) transition.Complete();
   }
 
   void SavePreset(int id) {
@@ -493,6 +555,7 @@ public:
   }
 
   void LoadAppletData(uint16_t key, HemisphereAudioApplet& applet, size_t slot) {
+    phz::ii::Transition transition(false);
     array<uint64_t, APPLET_CONFIG_SIZE> data;
     for (uint_fast8_t i = 0; i < APPLET_CONFIG_SIZE; ++i) {
       if (PhzConfig::getValue(key + i, data[i])) {
@@ -505,6 +568,7 @@ public:
     }
     applet.SetSlot(slot);
     applet.OnDataReceive(data);
+    transition.Complete();
   }
 
   void SaveAppletData(uint16_t key, HemisphereAudioApplet& applet, size_t slot) {

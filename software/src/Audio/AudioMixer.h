@@ -42,6 +42,7 @@ public:
 
     if (out_filled) {
       audio_block_t* out_block = allocate();
+      if (out_block == nullptr) return; // Drop this block safely when the pool is exhausted.
       arm_float_to_q15(out, out_block->data, AUDIO_BLOCK_SAMPLES);
       transmit(out_block);
       release(out_block);

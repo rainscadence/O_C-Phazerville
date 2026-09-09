@@ -152,7 +152,7 @@ private:
     }
 };
 
-phz::parameters::Schema Slew::Parameters() const {
+phz::parameters::Schema PHZ_PARAMETER_CODE Slew::Parameters() const {
   using namespace phz::parameters;
   static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {
     {1, "rise", "Rise", "coefficient", {Kind::Integer, 0, HEM_SLEW_MAX_VALUE}, ReadSetting<&Slew::rise>, WriteSetting<&Slew::rise>},

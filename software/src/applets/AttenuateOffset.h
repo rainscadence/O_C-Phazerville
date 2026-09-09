@@ -156,7 +156,7 @@ private:
 
 };
 
-phz::parameters::Schema AttenuateOffset::Parameters() const {
+phz::parameters::Schema PHZ_PARAMETER_CODE AttenuateOffset::Parameters() const {
   using namespace phz::parameters;
   // Stable public IDs/semantic keys; labels and UI order are independent.
   static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {

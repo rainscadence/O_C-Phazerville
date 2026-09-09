@@ -2,10 +2,12 @@
 
 #include "../Audio/AudioVCA.h"
 #include "../Audio/InterpolatingStream.h"
+#include "../parameters/CvMapping.h"
 
 template <AudioChannels Channels>
 class VcaApplet : public HemisphereAudioApplet {
 public:
+  phz::parameters::Schema Parameters() const override;
   const char* applet_name() {
     return "VCA";
   }
@@ -32,7 +34,10 @@ public:
 
   void Controller() {
     float lin_cv = level_cv.InF(1.0f);
-    float cv = shape > 0 ? varexp(0.3f * shape, lin_cv) : lin_cv;
+    int effective_shape = constrain(shape + shape_cv.InRescaled(100), 0, 100);
+    float cv = effective_shape > 0
+        ? varexp(0.3f * effective_shape, (lin_cv > 1.0f ? 1.0f : lin_cv))
+        : lin_cv;
     cv_stream.Push(float_to_q15(invert ? -cv : cv));
   }
 
@@ -86,28 +91,34 @@ public:
       MoveCursor(cursor, direction, NUM_PARAMS - 1);
       return;
     }
-    if(EditSelectedInputMap(direction)) return;
+    // Use the shared setting for nested attenuation edits too.
+    if (IsEditingInputMap()) {
+      auto map = std::get_if<CVInputMap*>(&selected_input_map);
+      if (map && *map == &level_cv) AdjustParameterNative(3, direction);
+      else if (map && *map == &shape_cv) AdjustParameterNative(7, direction);
+      return;
+    }
     switch (cursor) {
       case 0:
-        SetLevel(level + direction);
+        AdjustParameterNative(1, direction);
         break;
       case 1:
-        level_cv.ChangeSource(direction);
+        ChangeSource(2, level_cv, direction);
         break;
       case 2:
-        SetBias(bias + direction);
+        AdjustParameterNative(4, direction);
         break;
       case 3:
-        shape = constrain(shape + direction, 0, 100);
+        AdjustParameterNative(5, direction);
         break;
       case 4:
-        shape_cv.ChangeSource(direction);
+        ChangeSource(6, shape_cv, direction);
         break;
       case 5:
-        SetRectify(!rectify);
+        SetParameterNative(8, !rectify);
         break;
       case 6:
-        invert = !invert;
+        SetParameterNative(9, !invert);
         break;
     }
   }
@@ -126,6 +137,9 @@ public:
     rectify = Unpack(d, {62, 1});
     invert = Unpack(d, {63, 1});
     UnpackPackables(data[1], level_cv, shape_cv);
+    shape = constrain(shape, 0, 100);
+    SanitizeMap(level_cv);
+    SanitizeMap(shape_cv);
 
     SetLevel(level);
     SetBias(bias);
@@ -160,6 +174,18 @@ protected:
   void SetHelp() override {}
 
 private:
+  static void SanitizeMap(CVInputMap& map) {
+    if (!map.SetSource(map.Source())) map.SetSource(0);
+    map.attenuversion = constrain(map.attenuversion, -127, 127);
+  }
+
+  void ChangeSource(uint16_t id, const CVInputMap& map, int direction) {
+    // Resolve UI navigation on a copy; only the shared setter mutates live state.
+    auto next = map;
+    next.ChangeSource(direction);
+    SetParameterNative(id, next.Source());
+  }
+
   static const int NUM_PARAMS = 7;
 
   int8_t cursor = 0;
@@ -182,3 +208,36 @@ private:
     return (fastpow2(log2base * power) - 1.0f) / (fastpow2(log2base) - 1.0f);
   }
 };
+
+template <AudioChannels Channels>
+phz::parameters::Schema PHZ_PARAMETER_CODE VcaApplet<Channels>::Parameters() const {
+  using namespace phz::parameters;
+  using App = VcaApplet<Channels>;
+  using LevelMap = CvMapping<App, &App::level_cv>;
+  using ShapeMap = CvMapping<App, &App::shape_cv>;
+  static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {
+    {1, "level", "Level", "dB", {Kind::Integer, LVL_MIN_DB - 1, LVL_MAX_DB},
+      [](const Owner& o) -> int32_t { return static_cast<const App&>(o).level; },
+      [](Owner& o, int32_t v, uint64_t) {
+        static_cast<App&>(o).SetLevel(v); return true;
+      }},
+    LevelMap::Source(2, "level_cv.source", "Level CV source"),
+    LevelMap::Attenuversion(3, "level_cv.attenuversion", "Level CV amount"),
+    {4, "bias", "Offset", "dB", {Kind::Integer, LVL_MIN_DB - 1, LVL_MAX_DB},
+      [](const Owner& o) -> int32_t { return static_cast<const App&>(o).bias; },
+      [](Owner& o, int32_t v, uint64_t) {
+        static_cast<App&>(o).SetBias(v); return true;
+      }},
+    Field<App, &App::shape>::Make(5, "shape", "Shape", "percent", 0, 100),
+    ShapeMap::Source(6, "shape_cv.source", "Shape CV source"),
+    ShapeMap::Attenuversion(7, "shape_cv.attenuversion", "Shape CV amount"),
+    {8, "rectify", "Rectify", "boolean", {Kind::Boolean, 0, 1},
+      [](const Owner& o) -> int32_t { return static_cast<const App&>(o).rectify; },
+      [](Owner& o, int32_t v, uint64_t) {
+        static_cast<App&>(o).SetRectify(v != 0); return true;
+      }},
+    Field<App, &App::invert>::Make(9, "invert", "Invert", "boolean", 0, 1),
+  };
+  static_assert(Valid(entries), "Invalid VCA parameter schema");
+  return {entries, sizeof(entries) / sizeof(entries[0])};
+}

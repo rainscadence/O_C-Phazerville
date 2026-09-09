@@ -105,6 +105,10 @@ SECTIONS
 	_flexram_bank_config = 0xAAAAAAAA | ((1 << (_itcm_block_count * 2)) - 1);
 	_estack = ORIGIN(DTCM) + ((16 - _itcm_block_count) << 15);
 
+    /* Build floor only, not measured runtime stack acceptance. */
+    ASSERT(_ebss <= _estack && (_estack - _ebss) >= 16384,
+           "CRITICAL: T41 applet build leaves less than 16 KiB stack/local reserve!")
+
 	_flashimagelen = __text_csf_end - ORIGIN(FLASH);
 	_teensy_model_identifier = 0x25;
 

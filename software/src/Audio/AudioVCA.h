@@ -46,6 +46,7 @@ public:
 
     arm_mult_f32(mod, signal_f32, signal_f32, AUDIO_BLOCK_SAMPLES);
     auto* out = allocate();
+    if (out == nullptr) return; // Audio pool exhausted; inputs already released.
     arm_float_to_q15(signal_f32, out->data, AUDIO_BLOCK_SAMPLES);
     transmit(out);
     release(out);
@@ -57,4 +58,3 @@ private:
   float bias_ = 0.0f;
   bool rectify_ = false;
 };
-

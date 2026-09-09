@@ -184,7 +184,7 @@ private:
     }
 };
 
-phz::parameters::Schema ClockDivider::Parameters() const {
+phz::parameters::Schema PHZ_PARAMETER_CODE ClockDivider::Parameters() const {
   using namespace phz::parameters;
   static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {
     Field<ClockDivider, &ClockDivider::div, 0>::Make(1, "div[0]", "Primary A", "clock ratio", -CLOCKDIV_MAX, CLOCKDIV_MAX),

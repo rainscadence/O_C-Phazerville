@@ -140,7 +140,7 @@ private:
 
 };
 
-phz::parameters::Schema Voltage::Parameters() const {
+phz::parameters::Schema PHZ_PARAMETER_CODE Voltage::Parameters() const {
   using namespace phz::parameters;
   // Stable public IDs/semantic keys; labels and UI order are independent.
   static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {

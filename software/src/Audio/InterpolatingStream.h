@@ -73,6 +73,7 @@ public:
     // the ideal except when it can't is simple and worked the best.
     float d = constrain(delta, lo, hi);
     audio_block_t* out = allocate();
+    if (out == nullptr) return; // Preserve read position on pool exhaustion.
     switch (method) {
       case INTERPOLATION_ZOH:
         UpdateZOH(d, out);

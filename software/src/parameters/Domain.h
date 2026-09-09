@@ -1,4 +1,5 @@
 #pragma once
+#include "Memory.h"
 #include <stddef.h>
 #include <stdint.h>
 namespace phz { namespace parameters {
@@ -16,5 +17,5 @@ struct Domain {
 // (false is data, NOT failure). Enumeration accepts exact native values in a
 // nonnull immutable table of1..256 options; no normalization. Unknown kind
 // rejects. No allocation, mutation or live instance access; O(option_count).
-bool NativeAllowed(const Domain&, int32_t value);
+PHZ_PARAMETER_CODE bool NativeAllowed(const Domain&, int32_t value);
 }}

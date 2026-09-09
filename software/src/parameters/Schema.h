@@ -3,11 +3,6 @@
 #include <limits>
 #include <type_traits>
 #include <utility>
-#if defined(__IMXRT1062__)
-#define PHZ_PARAMETER_STORAGE __attribute__((section(".progmem.parameters")))
-#else
-#define PHZ_PARAMETER_STORAGE
-#endif
 namespace phz { namespace parameters {
 class Owner;
 struct Entry {
@@ -61,16 +56,16 @@ template<size_t N> constexpr bool Valid(const Entry (&entries)[N]) {
 class Owner {
  public:
 
-  virtual Schema Parameters() const { return {}; } // legacy applets reject
-  bool DescribeParameter(uint16_t id, Domain& out) const;
-  bool ReadParameter(uint16_t id, int32_t& out) const;
-  bool SetParameter(uint16_t id, int32_t value, uint64_t dependencies = 0);
+  PHZ_PARAMETER_CODE virtual Schema Parameters() const { return {}; } // legacy applets reject
+  PHZ_PARAMETER_CODE bool DescribeParameter(uint16_t id, Domain& out) const;
+  PHZ_PARAMETER_CODE bool ReadParameter(uint16_t id, int32_t& out) const;
+  PHZ_PARAMETER_CODE bool SetParameter(uint16_t id, int32_t value, uint64_t dependencies = 0);
  protected:
   // The applet host owns lifetime; never delete an applet through this view.
   ~Owner() = default;
  private:
-  const Entry* Find(uint16_t id) const;
-  bool Describe(const Entry&, Domain&) const;
+  PHZ_PARAMETER_CODE const Entry* Find(uint16_t id) const;
+  PHZ_PARAMETER_CODE bool Describe(const Entry&, Domain&) const;
 };
 // One declaration connects a scalar/array element to its native storage. Use a
 // custom Entry write callback for coupled state/DSP side effects instead.
@@ -88,10 +83,10 @@ template<class App, auto Member, size_t Index = 0> struct Field {
   static_assert(int64_t(std::numeric_limits<Value>::min()) >= INT32_MIN &&
                 uint64_t(std::numeric_limits<Value>::max()) <= INT32_MAX,
                 "Use custom accessors when native storage can exceed int32");
-  static int32_t Read(const Owner& owner) {
+  static PHZ_PARAMETER_CODE int32_t Read(const Owner& owner) {
     return Get(static_cast<const App&>(owner));
   }
-  static bool Write(Owner& owner, int32_t value, uint64_t) {
+  static PHZ_PARAMETER_CODE bool Write(Owner& owner, int32_t value, uint64_t) {
     if (int64_t(value) < int64_t(std::numeric_limits<Value>::min()) ||
         int64_t(value) > int64_t(std::numeric_limits<Value>::max())) return false;
     Get(static_cast<App&>(owner)) = static_cast<Value>(value);

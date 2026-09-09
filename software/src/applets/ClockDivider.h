@@ -22,6 +22,7 @@
 
 class ClockDivider : public HemisphereApplet {
 public:
+    phz::parameters::Schema Parameters() const override;
 
   enum ClockDivCursor {
     CHAN_A1, CHAN_A2,
@@ -82,25 +83,43 @@ public:
             return;
         }
 
-        if (cursor & 0x1)
-          divmult[cursor].Set( divmult[cursor].steps + direction );
-        else
-          div[cursor / 2] = constrain( div[cursor / 2] + direction, -CLOCKDIV_MAX, CLOCKDIV_MAX);
+        AdjustParameterNative(cursor + 1, direction);
     }
 
     uint64_t OnDataRequest() {
-        uint64_t data = 0;
+        // Versioned applet-local format. All payload bytes are nonnegative and
+        // fit; unmasked legacy Pack must never receive a signed negative value.
+        uint64_t data = uint64_t(PRESET_V1) << 32;
         for (size_t i = 0; i < 2; ++i) {
-          Pack(data, PackLocation {0 + i*8,8}, div[i] + 32);
-          Pack(data, PackLocation {16 + i*8,8}, divmult[1+i*2].steps + 32);
+          Pack(data, PackLocation {i*8,8}, uint8_t(div[i] + CLOCKDIV_MAX));
+          Pack(data, PackLocation {16+i*8,8}, uint8_t(divmult[1+i*2].steps - CLOCKDIV_MIN));
         }
         return data;
     }
 
     void OnDataReceive(uint64_t data) {
+        const uint32_t version = uint32_t(data >> 32);
+        int primary[2], secondary[2];
+        if (version == PRESET_V1) {
+          for (size_t i = 0; i < 2; ++i) {
+            primary[i] = Unpack(data, PackLocation {i*8,8}) - CLOCKDIV_MAX;
+            secondary[i] = Unpack(data, PackLocation {16+i*8,8}) + CLOCKDIV_MIN;
+            if (primary[i] < -CLOCKDIV_MAX || primary[i] > CLOCKDIV_MAX ||
+                secondary[i] < CLOCKDIV_MIN || secondary[i] > CLOCKDIV_MAX) return;
+          }
+        } else {
+          // Preserve the legacy decoder, including its already-corrupted
+          // all-ones spill records. Lost values cannot be reconstructed.
+          // Unknown version tags reject atomically rather than being guessed.
+          if (version != 0 && version != UINT32_MAX) return;
+          for (size_t i = 0; i < 2; ++i) {
+            primary[i] = constrain(Unpack(data, PackLocation {i*8,8}) - 32, -CLOCKDIV_MAX, CLOCKDIV_MAX);
+            secondary[i] = constrain(Unpack(data, PackLocation {16+i*8,8}) - 32, CLOCKDIV_MIN, CLOCKDIV_MAX);
+          }
+        }
         for (size_t i = 0; i < 2; ++i) {
-          div[i] = constrain((Unpack(data, PackLocation {0 + i*8,8}) - 32), -CLOCKDIV_MAX, CLOCKDIV_MAX);
-          divmult[1+i*2].Set( Unpack(data, PackLocation {16 + i*8,8}) - 32 ); // constrained via Set()
+          div[i] = primary[i];
+          divmult[1+i*2].Set(secondary[i]);
         }
     }
 
@@ -119,6 +138,15 @@ protected:
   }
 
 private:
+    static constexpr uint32_t PRESET_V1 = 0x43440101;
+    template<size_t Index> static int32_t ReadSecondary(const phz::parameters::Owner& owner) {
+      return static_cast<const ClockDivider&>(owner).divmult[Index].steps;
+    }
+    template<size_t Index> static bool WriteSecondary(phz::parameters::Owner& owner, int32_t value, uint64_t) {
+      // Preserve the native setter and running clock phase; no implicit reset.
+      static_cast<ClockDivider&>(owner).divmult[Index].Set(value);
+      return true;
+    }
     int div[2] = {1, 2}; // Division setting before modulation.
                          // Positive for divisions, negative for multipliers.
                          // Zero is mute.
@@ -155,3 +183,15 @@ private:
         gfxDottedLine(1, 36, 63, 36); // to separate the two channels
     }
 };
+
+phz::parameters::Schema ClockDivider::Parameters() const {
+  using namespace phz::parameters;
+  static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {
+    Field<ClockDivider, &ClockDivider::div, 0>::Make(1, "div[0]", "Primary A", "clock ratio", -CLOCKDIV_MAX, CLOCKDIV_MAX),
+    {2, "divmult[1].steps", "Secondary A", "clock ratio", {Kind::Integer, CLOCKDIV_MIN, CLOCKDIV_MAX}, ReadSecondary<1>, WriteSecondary<1>},
+    Field<ClockDivider, &ClockDivider::div, 1>::Make(3, "div[1]", "Primary B", "clock ratio", -CLOCKDIV_MAX, CLOCKDIV_MAX),
+    {4, "divmult[3].steps", "Secondary B", "clock ratio", {Kind::Integer, CLOCKDIV_MIN, CLOCKDIV_MAX}, ReadSecondary<3>, WriteSecondary<3>},
+  };
+  static_assert(Valid(entries), "Invalid ClockDivider settings");
+  return {entries, sizeof(entries) / sizeof(entries[0])};
+}

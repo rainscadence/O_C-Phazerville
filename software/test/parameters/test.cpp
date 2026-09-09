@@ -26,6 +26,7 @@ void Send(Owner& app,uint16_t id,uint16_t code,bool expected=true) {
   assert(engine.Inspect().counts.applied == unsigned(expected));
 }
 int32_t Read(const Owner& app,uint16_t id) { int32_t v; assert(app.ReadParameter(id,v)); return v; }
+#include "clock_slew_checks.h"
 // Not mentioned anywhere in the dispatcher or transport: automatic support is
 // a consequence of declaring settings through the same Owner interface.
 class FutureApplet : public Owner {
@@ -140,4 +141,4 @@ void Export(const char* type,unsigned id,const Owner& app) {
     printf("PARAM\t%s\t%u\t%u\t%s\t%u\t%d\t%d\n",type,id,e.id,e.key,unsigned(d.kind),d.minimum,d.maximum);
   }
 }
-int main(){DeclarationTests();FutureTests();RealAppletTests();Voltage v{};AttenuateOffset a{};Export("Voltage",43,v);Export("AttenuateOffset",56,a);}
+int main(){DeclarationTests();FutureTests();RealAppletTests();ClockSlewChecks();Voltage v{};AttenuateOffset a{};Export("Voltage",43,v);Export("AttenuateOffset",56,a);ClockDivider c{};Slew s{};Export("ClockDivider",6,c);Export("Slew",19,s);}

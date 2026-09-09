@@ -23,6 +23,7 @@
 
 class Slew : public HemisphereApplet {
 public:
+    phz::parameters::Schema Parameters() const override;
 
     const char* applet_name() { // Maximum 10 characters
         return "Slew";
@@ -38,7 +39,9 @@ public:
     void Controller() {
         ForEachChannel(ch)
         {
-            simfloat input = int2simfloat(In(ch));
+            // Multiplication is defined for negative native input; signed
+            // left shift is not. The native CV range fits the fixed-point type.
+            simfloat input = static_cast<simfloat>(int64_t(In(ch)) * (int64_t{1} << 14));
             if (Gate(ch)) signal[ch] = input; // Defeat slew when channel's gate is high
             if (input != signal[ch]) {
 
@@ -52,11 +55,12 @@ public:
                 int ticks_to_remaining = Proportion(simfloat2int(remaining), HEMISPHERE_MAX_INPUT_CV, max_change);
                 if (ticks_to_remaining < 0) ticks_to_remaining = -ticks_to_remaining;
 
+                // Apply channel scaling before guarding the final divisor.
+                if (ch == 1) ticks_to_remaining /= 2;
                 simfloat delta;
                 if (ticks_to_remaining <= 0) {
                     delta = remaining;
                 } else {
-                    if (ch == 1) ticks_to_remaining /= 2;
                     delta = remaining / ticks_to_remaining;
                 }
                 signal[ch] += delta;
@@ -74,17 +78,9 @@ public:
     }
 
     void OnEncoderMove(int direction) {
-        if (cursor == 0) {
-            rise = constrain(rise + direction, 0, HEM_SLEW_MAX_VALUE);
-            last_ms_value = Proportion(rise, HEM_SLEW_MAX_VALUE, HEM_SLEW_MAX_TICKS) / 17;
-        }
-        else {
-            fall = constrain(fall + direction, 0, HEM_SLEW_MAX_VALUE);
-            last_ms_value = Proportion(fall, HEM_SLEW_MAX_VALUE, HEM_SLEW_MAX_TICKS) / 17;
-        }
-        last_change_ticks = OC::CORE::ticks;
+        AdjustParameterNative(cursor == 0 ? 1 : 2, direction);
     }
-        
+
     uint64_t OnDataRequest() {
         uint64_t data = 0;
         Pack(data, PackLocation {0,8}, rise);
@@ -93,8 +89,8 @@ public:
     }
 
     void OnDataReceive(uint64_t data) {
-        rise = Unpack(data, PackLocation {0,8});
-        fall = Unpack(data, PackLocation {8,8});
+        rise = constrain(Unpack(data, PackLocation {0,8}), 0, HEM_SLEW_MAX_VALUE);
+        fall = constrain(Unpack(data, PackLocation {8,8}), 0, HEM_SLEW_MAX_VALUE);
     }
 
 protected:
@@ -112,6 +108,16 @@ protected:
     }
 
 private:
+    template<int Slew::* Member> static int32_t ReadSetting(const phz::parameters::Owner& owner) {
+      return static_cast<const Slew&>(owner).*Member;
+    }
+    template<int Slew::* Member> static bool WriteSetting(phz::parameters::Owner& owner, int32_t value, uint64_t) {
+      auto& app = static_cast<Slew&>(owner);
+      app.*Member = value;
+      app.last_ms_value = Proportion(value, HEM_SLEW_MAX_VALUE, HEM_SLEW_MAX_TICKS) / 17;
+      app.last_change_ticks = OC::CORE::ticks;
+      return true;
+    }
     int rise; // Time to reach signal level if signal < 5V
     int fall; // Time to reach signal level if signal > 0V
     simfloat signal[2]; // Current signal level for each channel
@@ -145,3 +151,13 @@ private:
         }
     }
 };
+
+phz::parameters::Schema Slew::Parameters() const {
+  using namespace phz::parameters;
+  static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {
+    {1, "rise", "Rise", "coefficient", {Kind::Integer, 0, HEM_SLEW_MAX_VALUE}, ReadSetting<&Slew::rise>, WriteSetting<&Slew::rise>},
+    {2, "fall", "Fall", "coefficient", {Kind::Integer, 0, HEM_SLEW_MAX_VALUE}, ReadSetting<&Slew::fall>, WriteSetting<&Slew::fall>},
+  };
+  static_assert(Valid(entries), "Invalid Slew settings");
+  return {entries, sizeof(entries) / sizeof(entries[0])};
+}

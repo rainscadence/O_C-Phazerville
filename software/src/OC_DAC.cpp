@@ -166,6 +166,11 @@ uint16_t DAC::history_[DAC_CHANNEL_COUNT][DAC::kHistoryDepth];
 /*static*/ 
 volatile size_t DAC::history_tail_;
 
+FLASHMEM __attribute__((noinline))
+int32_t DAC::GateToDAC(DAC_CHANNEL channel, int32_t value, int high_voltage) {
+  return value ? get_octave_offset(channel, high_voltage) : get_zero_offset(channel);
+}
+
 } // namespace OC
 
 void DAC8565::Write(uint32_t cmd, uint32_t data) {

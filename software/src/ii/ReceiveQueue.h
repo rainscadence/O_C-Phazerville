@@ -1,5 +1,6 @@
 #pragma once
 #include "Protocol.h"
+#include "compact.h"
 #include <string.h>
 
 namespace phz { namespace ii {
@@ -8,18 +9,47 @@ namespace phz { namespace ii {
 class ReceiveQueue {
  public:
   static constexpr size_t kCapacity = 8;
+  enum class Kind : uint8_t { Legacy, Quantizer };
+  struct Item {
+    Kind kind = Kind::Legacy;
+    uint8_t frame[kFrameSize]{};
+    pc_qtz_request quantizer{};
+  };
   void Clear() { head_ = count_ = 0; }
   void Reset() { head_ = count_ = 0; rejected_ = dropped_ = 0; }
   bool Capture(const uint8_t* bytes, size_t size) {
     if (!bytes || size != kFrameSize) { ++rejected_; return false; }
     if (count_ == kCapacity) { ++dropped_; return false; }
-    memcpy(frames_[(head_ + count_) % kCapacity], bytes, kFrameSize);
+    auto& item = items_[(head_ + count_) % kCapacity];
+    item = {};
+    item.kind = Kind::Legacy;
+    memcpy(item.frame, bytes, kFrameSize);
     ++count_;
     return true;
   }
-  bool Pop(uint8_t (&bytes)[kFrameSize]) {
+  bool CaptureQuantizer(const pc_qtz_request& request) {
+    if (request.op < PC_QTZ_SCALE || request.op > PC_QTZ_REPLACE) {
+      ++rejected_;
+      return false;
+    }
+    if (count_ == kCapacity) { ++dropped_; return false; }
+    auto& item = items_[(head_ + count_) % kCapacity];
+    item = {};
+    item.kind = Kind::Quantizer;
+    item.quantizer = request;
+    ++count_;
+    return true;
+  }
+  bool Pop(Item& item) {
     if (!count_) return false;
-    memcpy(bytes, frames_[head_], kFrameSize);
+    item = items_[head_];
+    head_ = (head_ + 1) % kCapacity;
+    --count_;
+    return true;
+  }
+  bool Pop(uint8_t (&bytes)[kFrameSize]) {
+    if (!count_ || items_[head_].kind != Kind::Legacy) return false;
+    memcpy(bytes, items_[head_].frame, kFrameSize);
     head_ = (head_ + 1) % kCapacity;
     --count_;
     return true;
@@ -29,7 +59,7 @@ class ReceiveQueue {
   uint32_t rejected() const { return rejected_; }
   uint32_t dropped() const { return dropped_; }
  private:
-  uint8_t frames_[kCapacity][kFrameSize]{};
+  Item items_[kCapacity]{};
   size_t head_ = 0, count_ = 0;
   uint32_t rejected_ = 0, dropped_ = 0;
 };

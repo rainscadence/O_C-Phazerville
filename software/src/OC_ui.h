@@ -8,6 +8,9 @@
 #include "src/UI/ui_button.h"
 #include "src/UI/ui_encoder.h"
 #include "src/UI/ui_event_queue.h"
+#if defined(ARDUINO_TEENSY41)
+#include "remote/Gesture.h"
+#endif
 
 struct RuntimeSlot;
 
@@ -82,13 +85,18 @@ public:
   void DebugStats();
   bool AppSettings(bool drawmenu);
 #if defined(ARDUINO_TEENSY41)
-  void IiSettings();
+  void IiSettings(bool drawmenu);
 #endif
   UiMode DispatchEvents(const RuntimeSlot &appslot);
 
   void Poll();
   void Poke();
   void preempt_screensaver(bool v);
+#if defined(ARDUINO_TEENSY41)
+  bool RemoteGesture(const phz::remote::Gesture& gesture);
+  phz::remote::GestureController::State RemoteGestureState();
+  uint16_t physical_buttons() const { return physical_buttons_; }
+#endif
 
   inline bool read_immediate(UiControl control) {
     return button_state_ & control;
@@ -125,6 +133,8 @@ public:
     button_ignore_mask_ = button_state_;
   }
 
+  uint16_t diagnostic_ignore_mask() const { return button_ignore_mask_; }
+
   inline void IgnoreButton(UiControl control) {
     button_ignore_mask_ |= control;
   }
@@ -148,9 +158,19 @@ private:
   uint32_t button_press_time_[CONTROL_BUTTON_LAST];
   uint16_t button_state_ = 0;
   uint16_t button_ignore_mask_ = 0;
+#if defined(ARDUINO_TEENSY41)
+  phz::remote::GestureController remote_gestures_;
+  uint16_t physical_buttons_ = 0;
+#endif
   bool screensaver_ = 0;
   bool preempt_screensaver_ = 0;
   bool jump_to_menu_ = 0;
+
+#if defined(ARDUINO_TEENSY41)
+  bool ii_settings_open_ = false;
+  int ii_settings_field_ = 0; // Enable/address/TX mode/[USB audio]/firmware update
+  const char* ii_settings_message_ = "";
+#endif
 
   /* Reverse the left and right encoders if Hemisphere Suite is installed on the left-hand
    * side of a Northern Light 2OC 4U module.

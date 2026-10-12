@@ -38,6 +38,7 @@ enum OutputMode : uint8_t {
   OUTPUT_MODE_GATE,
   OUTPUT_MODE_UNI,
   OUTPUT_MODE_RAW,
+  OUTPUT_MODE_GATE_5V,
 };
 
 enum IO_SETTING {

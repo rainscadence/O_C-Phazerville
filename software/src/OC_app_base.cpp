@@ -38,6 +38,13 @@ namespace OC {
 static IOSettingsMenu io_settings_menu;
 static bool z_button_hold = false;
 
+PHZ_REMOTE_CODE bool AppBase::RemoteUi(char selector) {
+  // Never bypass the visible global I/O menu or a physical button chord.
+  if (io_settings_menu.active() || z_button_hold ||
+      ui.read_immediate(static_cast<UiControl>(0x7f))) return false;
+  return HandleRemoteUi(selector);
+}
+
 void AppBase::InitDefaults()
 {
   phz::ii::Transition transition;
@@ -152,7 +159,8 @@ void AppBase::DispatchAppEvent(AppEvent app_event)
     HandleAppEvent(app_event);
     z_button_hold = false;
     transition.Complete();
-    phz::ii::SetHostActive(app_event == APP_EVENT_RESUME && IiReady());
+    phz::ii::SetHostActive(app_event == APP_EVENT_RESUME && IiReady(),
+                           IiFamily(), IiQuantizerScaleCount());
     return;
   }
   switch(app_event) {

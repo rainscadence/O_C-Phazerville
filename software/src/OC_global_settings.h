@@ -29,6 +29,8 @@
 #include "OC_DAC.h"
 #if defined(ARDUINO_TEENSY41)
 #include "ii/AddressState.h"
+#include "txi2c2midi/ModeState.h"
+#include "txi2c2midi/SharedAddress.h"
 #endif
 #include "OC_chords.h"
 #include "OC_scales.h"
@@ -54,7 +56,7 @@ public:
 
   // NOTE These are used by load/save functions and might be hidden
   bool encoders_enable_acceleration;
-  bool reserved0;
+  bool usb_audio_mirror;
   bool reserved1;
   uint32_t reserved2;
   uint16_t current_app_id;
@@ -62,6 +64,8 @@ public:
   bool valid = false; // added in v2.0
 #if defined(ARDUINO_TEENSY41)
   phz::ii::AddressState ii_address;
+  txi2c2midi::ModeState tx_mode;
+  bool tx_address_ignored = false; // obsolete TX-only address differs at boot
 #endif
 
   // TODO[PLD] We should be able to use these structs directly to save space

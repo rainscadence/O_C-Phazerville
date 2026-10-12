@@ -25,6 +25,12 @@
 
 #include "OC_options.h"
 #include "ii/Parameter.h"
+#include "ii/HostAction.h"
+#include "ii/HostIdentity.h"
+#include "remote/Memory.h"
+#include "remote/UiState.h"
+#include "quantizer/QuantizerBank.h"
+#include "quantizer/QuantizerCommand.h"
 #include "OC_io.h"
 #include "OC_ui.h"
 #include "src/UI/ui_events.h"
@@ -41,6 +47,9 @@ namespace OC {
 
 void draw_save_message(uint8_t c);
 void SaveAppData();
+void EnterFirmwareUpdateMode();
+QuantizerCommandResult ApplyActiveQuantizerCommand(
+    const QuantizerCommand& command);
 #if defined(ARDUINO_TEENSY41)
 bool SaveIiAddress();
 void ServiceIi();
@@ -80,6 +89,22 @@ public:
   virtual bool DescribeIi(const phz::ii::Write&, phz::ii::Descriptor&) { return false; }
   virtual bool ApplyIi(const phz::ii::Prepared&) { return false; }
   virtual bool IiReady() { return false; }
+  virtual uint8_t IiFamily() const { return 0; }
+  virtual uint16_t IiQuantizerScaleCount() const { return 0; }
+  virtual bool SnapshotIiIdentity(phz::ii::HostIdentity&) { return false; }
+  virtual phz::ii::HostActionResult ApplyIiHostAction(const phz::ii::HostAction&) {
+    return phz::ii::HostActionResult::Rejected;
+  }
+  // Transport-independent Q1-Q8 command seam. Only apps that own a live
+  // quantizer bank opt in; every other app rejects without side effects.
+  virtual QuantizerCommandResult ApplyQuantizerCommand(
+      const QuantizerCommand&) {
+    return QuantizerCommandResult::Unsupported;
+  }
+  // Explicitly scoped USB testing surface; unsupported apps reject by default.
+  PHZ_REMOTE_CODE bool RemoteUi(char selector);
+  virtual bool HandleRemoteUi(char) { return false; }
+  virtual phz::remote::UiState RemoteUiState() const { return {}; }
   
   inline uint16_t id() const { return id_; }
   inline const char *name() const { return name_; }

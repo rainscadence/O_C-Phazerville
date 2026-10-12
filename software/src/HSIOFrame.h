@@ -10,6 +10,9 @@
 #pragma once
 
 #include <vector>
+#include "ii/VirtualInputState.h"
+#include "routing/OutputRouting.h"
+#include "routing/AutoMidi.h"
 #include "OC_config.h"
 #include "OC_io.h"
 #include "HSMIDI.h"
@@ -698,14 +701,8 @@ struct alignas(32) MIDIFrame {
     }
 
     // MIDI output stuff
-    int outchan_last[DAC_CHANNEL_COUNT];
     uint8_t current_note[16]; // note number, per MIDI channel
-    uint8_t current_ccval[DAC_CHANNEL_COUNT]; // level 0 - 127, per DAC channel
-    int note_countdown[DAC_CHANNEL_COUNT];
-    int last_cv[DAC_CHANNEL_COUNT];
-    bool clocked[DAC_CHANNEL_COUNT];
-    bool gate_high[DAC_CHANNEL_COUNT];
-    bool changed_cv[DAC_CHANNEL_COUNT];
+    phz::routing::AutoMidi<DAC_CHANNEL_COUNT> automatic_output;
 
     // Logging
     MIDIMessage log[7];
@@ -726,7 +723,10 @@ struct alignas(32) MIDIFrame {
     }
 
     void ProcessMIDIMsg(const MIDIMessage msg);
-    void Send(const SlewedValue *outvals);
+    void Send(const int32_t (&values)[DAC_CHANNEL_COUNT],
+              const phz::routing::OutputRouting<DAC_CHANNEL_COUNT>& routes,
+              bool enabled);
+    void StopAutoOutput(int pair = -1);
 
     void SendAfterTouch(const uint8_t midi_ch, uint8_t val) {
 #ifdef ARDUINO_TEENSY41
@@ -796,6 +796,7 @@ struct IOFrame {
     uint8_t clockoutskip[IO_CHANNEL_COUNT];
     int8_t output_slew[IO_CHANNEL_COUNT];
     int8_t output_atten[IO_CHANNEL_COUNT]; // -126 (-200%) to 126 (+200%), 63 is 100%
+    phz::routing::OutputRouting<DAC_CHANNEL_COUNT> output_routes;
 
     // output value cache, countdowns
     SlewedValue outputs[IO_CHANNEL_COUNT]; // now with Extra Precision!
@@ -821,6 +822,7 @@ struct IOFrame {
 
     void Init() {
       MIDIState.Init();
+      output_routes.Reset();
       for (int i = 0; i < IO_CHANNEL_COUNT; ++i) {
         output_slew[i] = 0;
         output_atten[i] = 60; // default to 100%
@@ -868,7 +870,7 @@ struct IOFrame {
 
     // --- Hard IO ---
     void Load(OC::IOFrame *ioframe);
-    void Send(OC::IOFrame *ioframe);
+    void Send(OC::IOFrame *ioframe, uint32_t output_epoch = 0);
 };
 
 extern IOFrame frame;

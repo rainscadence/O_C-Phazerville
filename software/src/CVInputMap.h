@@ -2,6 +2,34 @@
 #include "CVInputMapValue.h"
 
 struct DigitalInputMap {
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+private:
+  // Reuse the CV binding inventory so direction changes and preset usage
+  // account for digital consumers too. Only this member owns ii selection.
+  CVInputMap ii_input;
+  uint8_t Source() const {
+    if (ii_input.source_type() == CVInputMap::TYPE_II)
+      return TYPE_II | ii_input.index();
+    return source == TYPE_II ? 0 : source;
+  }
+  void Select(uint8_t next) {
+    if ((next & 0xe0) == TYPE_II) {
+      if (!ii_input.SetSource(next)) return;
+      source = TYPE_II;
+    } else {
+      ii_input.SetSource(0);
+      source = next;
+    }
+    last_gate_state = false;
+  }
+public:
+  CVInputMap* IiInput() { return &ii_input; }
+#else
+private:
+  uint8_t Source() const { return source; }
+  void Select(uint8_t next) { source = next; last_gate_state = false; }
+public:
+#endif
   // upper 3 bits
   enum DigitalSourceType : uint8_t {
     TYPE_NONE = 0,
@@ -13,15 +41,19 @@ struct DigitalInputMap {
     TYPE_MIDI_MAP = (5 << 5),
 
     RESERVED = (6 << 5),
+    TYPE_II = RESERVED,
     TYPE_INTERNAL = (7 << 5), // -1 and -2 fall here
   };
 
-  static constexpr DigitalSourceType ordered_types[6] = {
+  static constexpr DigitalSourceType ordered_types[] = {
     TYPE_NONE,
     TYPE_DIGITAL_INPUT,
     TYPE_ADC,
     TYPE_DAC,
     TYPE_MIDI_MAP,
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+    TYPE_II,
+#endif
     TYPE_INTERNAL,
   };
 
@@ -42,51 +74,62 @@ public:
   uint32_t clkcount = 0;
 
   bool ChangeSourceType(int dir) {
-    const int count = sizeof(ordered_types);
+    const int count = sizeof(ordered_types) / sizeof(ordered_types[0]);
     int tidx = 0;
-    while (source_type() != ordered_types[tidx] && tidx < count) ++tidx;
+    while (tidx < count && source_type() != ordered_types[tidx]) ++tidx;
     if (tidx >= count) tidx = 0;
     tidx += (dir>0?1:-1);
     CONSTRAIN(tidx, 0, count - 1);
     int sidx = constrain(index(), 0, channel_count(ordered_types[tidx]) - 1);
 
     DigitalSourceType oldtype = source_type();
-    source = ordered_types[tidx] | sidx;
+    Select(ordered_types[tidx] | sidx);
     return oldtype != source_type();
   }
   void ChangeSource(int dir) {
-    int sidx = index() + dir;
-    if (sidx < 0) {
-      if (ChangeSourceType(-1))
-        sidx = channel_count(source_type()) - 1;
+    if (!dir) return;
+    constexpr int count = sizeof(ordered_types) / sizeof(ordered_types[0]);
+    int type = 0;
+    while (type < count && ordered_types[type] != source_type()) ++type;
+    if (type == count) type = 0;
+    int idx = index();
+    for (int attempt = 0; attempt < 256; ++attempt) {
+      idx += dir > 0 ? 1 : -1;
+      if (idx < 0) {
+        if (!type) return;
+        idx = channel_count(ordered_types[--type]) - 1;
+      } else if (idx >= channel_count(ordered_types[type])) {
+        if (type + 1 == count) return;
+        ++type; idx = 0;
+      }
+      const uint8_t next = ordered_types[type] | idx;
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+      if (!phz::ii::SelectableIiInput(phz::ii::virtual_inputs, next)) continue;
+#endif
+      Select(next);
+      return;
     }
-    if (sidx >= channel_count(source_type())) {
-      if (ChangeSourceType(1))
-        sidx = 0;
-    }
-    CONSTRAIN(sidx, 0, channel_count(source_type()) - 1);
-    source = source_type() | uint8_t(sidx);
   }
 
   void SetGateInput(uint8_t idx) {
     CONSTRAIN(idx, 0, channel_count(TYPE_DIGITAL_INPUT) - 1);
-    source = TYPE_DIGITAL_INPUT | (idx & 0x1f);
+    Select(TYPE_DIGITAL_INPUT | (idx & 0x1f));
   }
   void SetInput(uint8_t idx) {
     CONSTRAIN(idx, 0, channel_count(TYPE_ADC) - 1);
-    source = TYPE_ADC | (idx & 0x1f);
+    Select(TYPE_ADC | (idx & 0x1f));
   }
   void SetOutput(uint8_t idx) {
     CONSTRAIN(idx, 0, channel_count(TYPE_DAC) - 1);
-    source = TYPE_DAC | (idx & 0x1f);
+    Select(TYPE_DAC | (idx & 0x1f));
   }
   void SetMidiMap(uint8_t midx) {
     CONSTRAIN(midx, 0, channel_count(TYPE_MIDI_MAP) - 1);
-    source = TYPE_MIDI_MAP | (midx & 0x1f);
+    Select(TYPE_MIDI_MAP | (midx & 0x1f));
   }
   void SetClockSource(uint8_t idx) {
     CONSTRAIN(idx, 0, channel_count(TYPE_INTERNAL) - 1);
-    source = TYPE_INTERNAL | (idx & 0x1f);
+    Select(TYPE_INTERNAL | (idx & 0x1f));
   }
 
   void Reset(bool hard = false) {
@@ -96,7 +139,7 @@ public:
     clkcount = 0;
   }
   void Clear() {
-    source = 0;
+    Select(0);
     Reset(true);
   }
 
@@ -117,6 +160,10 @@ public:
         return frame.ViewOut(index()) > GATE_THRESHOLD;
       case TYPE_MIDI_MAP:
         return frame.MIDIState.mapping[index()].ViewOut() > GATE_THRESHOLD;
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+      case TYPE_II:
+        return ii_input.RawIn() > GATE_THRESHOLD;
+#endif
       case TYPE_NONE:
       default:
         return false;
@@ -151,6 +198,10 @@ public:
         return (clkcount & 1) ? METRO_L_ICON : METRO_R_ICON;
       case TYPE_MIDI_MAP:
         return PhzIcons::midiIn;
+      case TYPE_II: {
+        static const uint8_t icon[8] = {0, 0x7a, 0, 0, 0x7a, 0, 0, 0};
+        return icon;
+      }
 
       case TYPE_DIGITAL_INPUT:
         if (index() < 4)
@@ -171,10 +222,10 @@ public:
   }
   char const* InputName() const {
     static char in_label[] = "T 1";
-    const char type[] = {' ', '-', 'T', 'C', '#', 'M', '?', '*'};
+    const char type[] = {' ', '-', 'T', 'C', '#', 'M', 'I', '*'};
     const char* clktype[] = {"CL1", "CL4", "RUN", "RST"};
 
-    if (!source) return " - ";
+    if (!Source()) return " - ";
 
     in_label[0] = type[source_type() >> 5];
     uint8_t idx = constrain(index(), 0, channel_count(source_type()));
@@ -190,6 +241,7 @@ public:
       case TYPE_DIGITAL_INPUT:
       case TYPE_ADC:
       case TYPE_MIDI_MAP:
+      case TYPE_II:
         ++idx;
         if (idx / 10)
           in_label[1] = char('0' + idx / 10);
@@ -208,11 +260,20 @@ public:
   }
 
   uint32_t Pack() const {
-    return (source & 0xFF) | as_unsigned(div_mult.steps << 8) | (e_length & 0x1f) << 16 | (e_beats & 0x3f) << 21 | (e_rotate & 0x1f) << 27;
+    return Source() | as_unsigned(div_mult.steps << 8) | (e_length & 0x1f) << 16 | (e_beats & 0x3f) << 21 | (e_rotate & 0x1f) << 27;
   }
 
   void Unpack(uint32_t data) {
-    source = data & 0xFF;
+    Clear();
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+    if ((data & 0xe0) == TYPE_II) {
+      // Preset direction validation happens against the staged bank, not the
+      // old live bank. Retain disabled bindings just like CV input restore.
+      ii_input.Unpack(uint16_t(60 << 8) | uint8_t(data));
+      source = TYPE_II;
+    } else
+#endif
+    Select(data & 0xFF);
 
     // migrate old data; zero is still disabled; -1 and -2 are still valid
     if (source && (source >> 5) < 2) {
@@ -242,12 +303,12 @@ public:
     e_rotate = (data >> 27) & 0x1f; // 5 bits
   }
 
-  const bool enabled() const { return source != 0; }
+  const bool enabled() const { return Source() != 0; }
   DigitalSourceType source_type() const {
-    return (DigitalSourceType)(source & (0x7 << 5)); // upper 3 bits
+    return (DigitalSourceType)(Source() & (0x7 << 5)); // upper 3 bits
   }
   inline uint8_t index() const {
-    return source & 0x1f;
+    return Source() & 0x1f;
   }
   const bool is_clock() const {
     return (source_type() == TYPE_INTERNAL) && (index() <= 1);
@@ -273,6 +334,10 @@ public:
         return 2 * APPLET_CURSOR_COUNT;
       case TYPE_MIDI_MAP:
         return MIDIMAP_MAX;
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+      case TYPE_II:
+        return 32;
+#endif
     }
   }
 };

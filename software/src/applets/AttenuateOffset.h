@@ -56,10 +56,12 @@ public:
         }
     }
 
+    PHZ_APPLET_UI_CODE
     void View() {
         DrawInterface();
     }
 
+    PHZ_APPLET_UI_CODE
     void OnButtonPress() {
         if (cursor == 4) // special case toggle
             SetParameterNative(5, !mix);
@@ -67,6 +69,7 @@ public:
             CursorToggle();
     }
 
+    PHZ_APPLET_UI_CODE
     void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 4);

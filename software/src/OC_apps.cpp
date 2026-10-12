@@ -27,6 +27,7 @@
 #include "OC_apps.h"
 #include "ii/Lifecycle.h"
 #include "ii/Follower.h"
+#include "txi2c2midi/Configuration.h"
 #include "OC_menus.h"
 #include "OC_config.h"
 #include "OC_digital_inputs.h"
@@ -61,6 +62,9 @@
 #endif
 #include "VBiasManager.h"
 #include "HSClockManager.h"
+#ifdef ARDUINO_TEENSY41
+#include "AudioIO.h"
+#endif
 
 #ifndef NO_HEMISPHERE
 // applets
@@ -77,6 +81,9 @@
 // actual apps are included and instantiated here
 #include "apps/_config.h"
 
+extern uint_fast8_t MENU_REDRAW;
+extern "C" void _reboot_Teensyduino_();
+
 namespace OC {
 
 // NOTE These are slightly wasteful, in that the PageStorage implementation and
@@ -89,6 +96,44 @@ static DMAMEM AppData app_data;
 static GlobalSettingsStorage global_settings_storage;
 #endif
 static DMAMEM AppDataStorage app_data_storage;
+
+namespace phz_settings_ui {
+static const char app_menu[] PROGMEM = "Phazerville...";
+static const char title[] PROGMEM = "Settings";
+static const char update_hint[] PROGMEM = "Hold right to update";
+static const char update_row[] PROGMEM = "Firmware Update";
+static const char footer_save[] PROGMEM = "[BACK]        [SAVE]";
+static const char footer_update[] PROGMEM = "[BACK]      [HOLD R]";
+static const char update_mode[] PROGMEM = "Firmware Update Mode";
+static const char update_loader[] PROGMEM = "(use Teensy Loader)";
+#ifdef AUDIO_INTERFACE
+static const char usb_audio_row[] PROGMEM = "USB Audio: %s";
+#endif
+}
+
+#if defined(ARDUINO_TEENSY41) && defined(AUDIO_INTERFACE)
+static constexpr uint16_t kUsbAudioMirrorSettingsKey = 0x0902;
+#endif
+
+FLASHMEM void EnterFirmwareUpdateMode() {
+  // Prevent the loader from holding a previously high or non-zero output.
+  CORE::app_isr_enabled = false;
+  delay(1);
+  DAC::set_all_octave(0);
+  DAC::Update();
+
+  const uint32_t start = millis();
+  while (millis() < start + SETTINGS_SAVE_TIMEOUT_MS) {
+    GRAPHICS_BEGIN_FRAME(true);
+    gfxPos(5, 10);
+    graphics.print(phz_settings_ui::update_mode);
+    gfxPos(5, 19);
+    graphics.print(phz_settings_ui::update_loader);
+    GRAPHICS_END_FRAME();
+  }
+
+  _reboot_Teensyduino_();
+}
 
 #ifdef __IMXRT1062__
 enum GlobalSettingsDataKeys : uint16_t {
@@ -122,6 +167,7 @@ static bool SaveGlobalSettings(bool factory = false) {
     uint64_t record = 0;
     if (!global_settings.ii_address.PendingRecord(record)) return false;
     PhzConfig::setValue(phz::ii::kSettingsKey, record);
+    PhzConfig::setValue(txi2c2midi::kModeSettingsKey, global_settings.tx_mode.PendingRecord());
   }
 #endif
 
@@ -381,7 +427,7 @@ void AppSwitcher::set_current_app(size_t index)
 }
 
 FLASHMEM
-void AppSwitcher::Init(bool reset_settings) {
+void AppSwitcher::Init(bool reset_settings, bool reset_confirmed) {
   phz::ii::SetHostActive(false);
   phz::ii::Transition transition(true);
 
@@ -404,7 +450,7 @@ void AppSwitcher::Init(bool reset_settings) {
 
   global_settings.Init();
   global_settings.encoders_enable_acceleration = OC_ENCODERS_ENABLE_ACCELERATION_DEFAULT;
-  global_settings.reserved0 = false;
+  global_settings.usb_audio_mirror = true;
   global_settings.reserved1 = false;
   global_settings.reserved2 = 0U;
   global_settings.current_app_id = DEFAULT_APP_ID;
@@ -430,10 +476,26 @@ void AppSwitcher::Init(bool reset_settings) {
   const bool ii_present = PhzConfig::getValue(phz::ii::kSettingsKey, ii_record);
   global_settings.ii_address.Boot(globals_valid && global_settings.valid,
                                   ii_present, ii_record);
+  uint64_t tx_record = 0;
+  const bool tx_present = PhzConfig::getValue(txi2c2midi::kModeSettingsKey, tx_record);
+  global_settings.tx_mode.Boot(globals_valid && global_settings.valid, tx_present, tx_record);
+  uint64_t tx_address_record = 0;
+  const bool tx_address_present = PhzConfig::getValue(txi2c2midi::kDeviceAddressKey, tx_address_record);
+  global_settings.tx_address_ignored = txi2c2midi::LegacyAddressIgnored(
+      global_settings.ii_address, tx_address_present, tx_address_record);
+#ifdef AUDIO_INTERFACE
+  uint64_t usb_audio_record = 0;
+  const bool usb_audio_present = PhzConfig::getValue(
+      kUsbAudioMirrorSettingsKey, usb_audio_record);
+  global_settings.usb_audio_mirror = !usb_audio_present || usb_audio_record == 0x101;
+  if (usb_audio_record != 0x100 && usb_audio_record != 0x101)
+    global_settings.usb_audio_mirror = true;
+  AudioIO::SetUsbAudioMirror(global_settings.usb_audio_mirror);
+#endif
 #endif
 
   if (reset_settings || !global_settings.valid) {
-    if (ui.ConfirmReset()) {
+    if (reset_confirmed || ui.ConfirmReset()) {
       reset_settings = true; // do not restore the pre-reset maps afterward
       APPS_SERIAL_PRINTLN("Erase EEPROM ...");
       EEPtr d = EEPROM_GLOBALSETTINGS_START;
@@ -453,11 +515,14 @@ void AppSwitcher::Init(bool reset_settings) {
       global_settings.valid = true;
 #if defined(ARDUINO_TEENSY41)
       global_settings.ii_address.FactoryDefaults();
+      global_settings.tx_mode.Boot(true, false, 0);
+      global_settings.tx_address_ignored = false;
 #endif
       if (!SaveGlobalSettings(true)) {
         global_settings.valid = false;
 #if defined(ARDUINO_TEENSY41)
         global_settings.ii_address.Boot(false, false, 0);
+        global_settings.tx_mode.Boot(false, false, 0);
 #endif
       }
     } else {
@@ -665,6 +730,39 @@ void draw_save_message(uint8_t c) {
   GRAPHICS_END_FRAME();
 }
 
+#if defined(ARDUINO_TEENSY41) && defined(ENABLE_APP_TXI2C2MIDI)
+FLASHMEM
+static size_t AppMenuInsertionIndex() {
+  #ifdef ENABLE_APP_MIDI
+  return app_container.IndexOfAppByID(AppCaptainMIDI::kAppId) + 1;
+  #else
+  return 1;
+  #endif
+}
+#endif
+
+FLASHMEM
+static size_t AppMenuToContainerIndex(size_t menu_index) {
+#if defined(ARDUINO_TEENSY41) && defined(ENABLE_APP_TXI2C2MIDI)
+  const size_t insertion = AppMenuInsertionIndex();
+  const size_t tx = app_container.IndexOfAppByID(AppTXI2C2MIDI::kAppId);
+  if (menu_index == insertion) return tx;
+  if (menu_index > insertion && menu_index <= tx) return menu_index - 1;
+#endif
+  return menu_index;
+}
+
+FLASHMEM
+static size_t ContainerToAppMenuIndex(size_t container_index) {
+#if defined(ARDUINO_TEENSY41) && defined(ENABLE_APP_TXI2C2MIDI)
+  const size_t insertion = AppMenuInsertionIndex();
+  const size_t tx = app_container.IndexOfAppByID(AppTXI2C2MIDI::kAppId);
+  if (container_index == tx) return insertion;
+  if (container_index >= insertion && container_index < tx) return container_index + 1;
+#endif
+  return container_index;
+}
+
 FLASHMEM
 bool Ui::AppSettings(bool drawmenu) {
   static menu::ScreenCursor<5> cursor;
@@ -681,9 +779,19 @@ bool Ui::AppSettings(bool drawmenu) {
   // --- state change: entering App Menu
   if (!opened) {
     cursor.Init(0, menu_count - 1);
-    cursor.Scroll(app_container.IndexOfAppByID(global_settings.current_app_id));
+    cursor.Scroll(ContainerToAppMenuIndex(
+        app_container.IndexOfAppByID(global_settings.current_app_id)));
     opened = true;
   }
+
+#if defined(ARDUINO_TEENSY41)
+  // Service this child page once per main-loop visit. Keeping it inside a
+  // private modal loop prevents USB capture and other foreground services.
+  if (ii_settings_open_) {
+    IiSettings(drawmenu);
+    return true;
+  }
+#endif
 
   // View - graphics
   if (drawmenu) {
@@ -705,9 +813,10 @@ bool Ui::AppSettings(bool drawmenu) {
       // if (your_mom_is_boring)
       //   graphics.print(app_container[current]->boring_name());
       // else
-      if (current == app_count) graphics.print("ii address...");
-      else graphics.print(app_container[current].name());
-      if (current < app_count && global_settings.current_app_id == app_container[current].id())
+      const size_t app_index = AppMenuToContainerIndex(current);
+      if (current == app_count) graphics.print(phz_settings_ui::app_menu);
+      else graphics.print(app_container[app_index].name());
+      if (current < app_count && global_settings.current_app_id == app_container[app_index].id())
         graphics.drawBitmap8(0, item.y + 1, 8, ZAP_ICON);
 
       item.DrawCustom();
@@ -737,7 +846,15 @@ bool Ui::AppSettings(bool drawmenu) {
       case CONTROL_BUTTON_R:
 #if defined(ARDUINO_TEENSY41)
         if (cursor.cursor_pos() == app_count) {
-          if (UI::EVENT_BUTTON_PRESS == event.type) IiSettings();
+          if (UI::EVENT_BUTTON_PRESS == event.type) {
+            ii_settings_open_ = true;
+            ii_settings_field_ = 0;
+            ii_settings_message_ = "";
+            event_queue_.Flush();
+            SetButtonIgnoreMask();
+            MENU_REDRAW = 1;
+            return true;
+          }
           break;
         }
 #endif
@@ -782,7 +899,7 @@ bool Ui::AppSettings(bool drawmenu) {
   delay(1);
 
   if (change_app) {
-    app_switcher.set_current_app(cursor.cursor_pos());
+    app_switcher.set_current_app(AppMenuToContainerIndex(cursor.cursor_pos()));
     FreqMeasure.end();
     OC::DigitalInputs::reInit();
     if (save) {
@@ -811,45 +928,132 @@ bool SaveIiAddress() {
   const bool was_enabled = CORE::app_isr_enabled;
   CORE::app_isr_enabled = false;
   const bool saved = phz::ii::SaveAddress(PhzConfig::myfs,
-      PhzConfig::CONFIG_FILENAME, global_settings.ii_address);
+      PhzConfig::CONFIG_FILENAME, global_settings.ii_address, &global_settings.tx_mode
+#ifdef AUDIO_INTERFACE
+      , kUsbAudioMirrorSettingsKey,
+      uint64_t(0x100 | (global_settings.usb_audio_mirror ? 1 : 0))
+#endif
+      );
   CORE::app_isr_enabled = was_enabled;
   return saved;
 }
 
-FLASHMEM void Ui::IiSettings() {
-  event_queue_.Flush();
-  SetButtonIgnoreMask();
+FLASHMEM void Ui::IiSettings(bool drawmenu) {
   auto& address = global_settings.ii_address;
-  bool done = false;
-  const char* message = "";
-  do {
-    while (event_queue_.available()) {
-      const UI::Event event = event_queue_.PullEvent();
-      if (IgnoreEvent(event)) continue;
-      if (event.control == CONTROL_ENCODER_R && event.type == UI::EVENT_ENCODER) {
-        const int next = int(address.pending()) + event.value;
-        address.Edit(next < 8 ? 8 : (next > 0x77 ? 0x77 : next));
-        message = "";
-      } else if (event.control == CONTROL_BUTTON_R && event.type == UI::EVENT_BUTTON_PRESS) {
-        message = SaveIiAddress() ? "Saved. Reboot to use" : "SAVE FAILED";
-      } else if (event.control == CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
-        done = true;
-      }
-    }
-    GRAPHICS_BEGIN_FRAME(true);
-    graphics.setPrintPos(0, 0); graphics.print("ii follower address");
+  auto& mode = global_settings.tx_mode;
+#ifdef AUDIO_INTERFACE
+  constexpr int usb_audio_field = 3;
+  constexpr int update_field = 4;
+#else
+  constexpr int update_field = 3;
+#endif
+  if (drawmenu) {
+    // Main.cpp already owns this graphics frame, just like the parent menu.
+    graphics.setPrintPos(1, 1); graphics.print(phz_settings_ui::title);
+    graphics.drawLine(0, 10, 127, 10);
+    graphics.drawLine(0, 12, 127, 12);
+
     char line[24];
-    if (address.enabled()) snprintf(line, sizeof(line), "Active: 0x%02X", address.active());
-    else snprintf(line, sizeof(line), "Active: OFF (config)");
-    graphics.setPrintPos(0, 12); graphics.print(line);
-    snprintf(line, sizeof(line), "Pending: 0x%02X%s", address.pending(), address.dirty() ? " *" : "");
-    graphics.setPrintPos(0, 24); graphics.print(line);
-    graphics.setPrintPos(0, 36);
-    graphics.print(*message ? message : (address.reboot_required() ? "Reboot required" : "Check bus collisions"));
-    graphics.setPrintPos(0, 54); graphics.print("[Back]        [Save]");
-    GRAPHICS_END_FRAME();
-  } while (!done);
-  event_queue_.Flush(); event_queue_.Poke();
+    if (address.enabled()) snprintf(line, sizeof(line), "I2C Active: 0x%02X", address.active());
+    else snprintf(line, sizeof(line), address.faulted() ? "I2C Active: FAULT" : "I2C Active: OFF");
+    graphics.setPrintPos(1, 15);
+    if (*ii_settings_message_) graphics.print(ii_settings_message_);
+    else if (ii_settings_field_ == update_field) graphics.print(phz_settings_ui::update_hint);
+    else if (ii_settings_field_ == 2) {
+#ifdef ENABLE_APP_TXI2C2MIDI
+      graphics.print("TX preview only");
+#else
+      graphics.print("TX app not installed");
+#endif
+    }
+    else if (address.reboot_required()) graphics.print("Reboot required");
+    else graphics.print(line);
+
+    constexpr int visible_fields = 3;
+    constexpr int first_field_y = 25;
+    constexpr int field_height = 10;
+    const int first_visible = max(0, ii_settings_field_ - (visible_fields - 1));
+    for (int field = first_visible;
+         field <= update_field && field < first_visible + visible_fields;
+         ++field) {
+      switch (field) {
+      case 0:
+        snprintf(line, sizeof(line), "Enable: %s%s",
+          address.pending_enabled() ? "On" : "Off", address.dirty() ? " *" : "");
+        break;
+      case 1:
+        snprintf(line, sizeof(line), "Pending: 0x%02X%s",
+          address.pending(), address.dirty() ? " *" : "");
+        break;
+      case 2:
+        snprintf(line, sizeof(line), "TX Mode: %s%s",
+          mode.pending() == txi2c2midi::Mode::Single ? "Single" : "Legacy",
+          mode.faulted() ? " !" : (mode.dirty() ? " *" : (mode.reboot_required() ? " R" : "")));
+        break;
+#ifdef AUDIO_INTERFACE
+      case usb_audio_field:
+        snprintf(line, sizeof(line), phz_settings_ui::usb_audio_row,
+          global_settings.usb_audio_mirror ? "On" : "Off");
+        break;
+#endif
+      default:
+        snprintf(line, sizeof(line), "%s", phz_settings_ui::update_row);
+        break;
+      }
+
+      const int y = first_field_y + (field - first_visible) * field_height;
+      graphics.setPrintPos(1, y);
+      graphics.print(line);
+      if (field == ii_settings_field_) graphics.invertRect(0, y, 128, 9);
+    }
+
+    graphics.setPrintPos(0, 55);
+    graphics.print(ii_settings_field_ == update_field ?
+      phz_settings_ui::footer_update : phz_settings_ui::footer_save);
+    return;
+  }
+
+  // Even continuous encoder traffic must yield back to USB/background work.
+  for (size_t budget = kEventQueueDepth; budget && event_queue_.available(); --budget) {
+    const UI::Event event = event_queue_.PullEvent();
+    if (IgnoreEvent(event)) continue;
+    MENU_REDRAW = 1;
+    if (event.control == CONTROL_ENCODER_R && event.type == UI::EVENT_ENCODER) {
+      if (event.value) {
+        ii_settings_field_ += event.value > 0 ? 1 : -1;
+        if (ii_settings_field_ < 0) ii_settings_field_ = 0;
+        if (ii_settings_field_ > update_field) ii_settings_field_ = update_field;
+        ii_settings_message_ = "";
+      }
+    } else if (event.control == CONTROL_ENCODER_L && event.type == UI::EVENT_ENCODER) {
+      if (ii_settings_field_ == 0) {
+        if (event.value) address.EditEnabled(event.value > 0);
+      } else if (ii_settings_field_ == 1) {
+        const int64_t next = int64_t(address.pending()) + event.value;
+        address.Edit(next < 8 ? 8 : (next > 0x77 ? 0x77 : int(next)));
+      } else if (ii_settings_field_ == 2 && event.value) {
+        mode.Edit(event.value > 0 ? txi2c2midi::Mode::Legacy : txi2c2midi::Mode::Single);
+#ifdef AUDIO_INTERFACE
+      } else if (ii_settings_field_ == usb_audio_field && event.value) {
+        global_settings.usb_audio_mirror = event.value > 0;
+        AudioIO::SetUsbAudioMirror(global_settings.usb_audio_mirror);
+#endif
+      }
+      ii_settings_message_ = "";
+    } else if (event.control == CONTROL_BUTTON_R && ii_settings_field_ == update_field &&
+               event.type == UI::EVENT_BUTTON_LONG_PRESS) {
+      EnterFirmwareUpdateMode();
+    } else if (event.control == CONTROL_BUTTON_R && ii_settings_field_ != update_field &&
+               event.type == UI::EVENT_BUTTON_PRESS) {
+      ii_settings_message_ = SaveIiAddress() ? "Saved. Reboot to use" : "SAVE FAILED";
+    } else if (event.control == CONTROL_BUTTON_L && event.type == UI::EVENT_BUTTON_PRESS) {
+      ii_settings_open_ = false;
+      event_queue_.Flush();
+      event_queue_.Poke();
+      SetButtonIgnoreMask();
+      return;
+    }
+  }
 }
 #endif
 
@@ -858,6 +1062,8 @@ bool Ui::ConfirmReset() {
 
   SetButtonIgnoreMask();
 
+  constexpr uint32_t kAutoCancelMs = 10000;
+  elapsedMillis auto_cancel = 0;
   bool done = false;
   bool confirm = false;
 
@@ -866,10 +1072,12 @@ bool Ui::ConfirmReset() {
       UI::Event event = event_queue_.PullEvent();
       if (IgnoreEvent(event))
         continue;
-      if (CONTROL_BUTTON_R == event.control && UI::EVENT_BUTTON_PRESS == event.type) {
+      const bool click = UI::EVENT_BUTTON_DOWN == event.type ||
+                         UI::EVENT_BUTTON_PRESS == event.type;
+      if (CONTROL_BUTTON_R == event.control && click) {
         confirm = true;
         done = true;
-      } else if (CONTROL_BUTTON_L == event.control && UI::EVENT_BUTTON_PRESS == event.type) {
+      } else if (CONTROL_BUTTON_L == event.control && click) {
         confirm = false;
         done = true;
       }
@@ -886,12 +1094,33 @@ bool Ui::ConfirmReset() {
     graphics.setPrintPos(1, 25);
     graphics.print("settings on EEPROM?");
 
+    graphics.setPrintPos(1, 40);
+    graphics.print("Auto-cancel: ");
+    const uint32_t elapsed = auto_cancel;
+    const uint32_t remaining = elapsed < kAutoCancelMs ? kAutoCancelMs - elapsed : 0;
+    graphics.print(static_cast<int>((remaining + 999) / 1000));
+    graphics.print("s");
+
     graphics.setPrintPos(0, 55);
     graphics.print("[CANCEL]         [OK]");
 
     GRAPHICS_END_FRAME();
 
+    // setup() has not reached loop() yet, so this modal must explicitly let
+    // the Teensy core service USB while it waits for a decision.
+    yield();
+
+    // Never let an unanswered destructive confirmation prevent startup. The
+    // safe default preserves EEPROM and continues with the available data.
+    if (auto_cancel >= kAutoCancelMs)
+      done = true;
+
   } while (!done);
+
+  // A BUTTON_DOWN decision returns before the physical release. Do not leak
+  // that release (or another queued modal event) into the next screen.
+  event_queue_.Flush();
+  SetButtonIgnoreMask();
 
   return confirm;
 }
@@ -902,18 +1131,49 @@ void start_calibration() {
   OC::app_switcher.set_current_app(0);
 }
 
+FLASHMEM
+QuantizerCommandResult ApplyActiveQuantizerCommand(
+    const QuantizerCommand& command) {
+  // Q slots can be consumed from the app ISR. Keep the commit indivisible from
+  // its perspective; transports must call this service from the main loop.
+  struct PauseDsp {
+    bool previous = CORE::app_isr_enabled;
+    PauseDsp() { CORE::app_isr_enabled = false; }
+    ~PauseDsp() { CORE::app_isr_enabled = previous; }
+  } pause;
+  return app_switcher.current_app()->ApplyQuantizerCommand(command);
+}
+
 }; // namespace OC
 
 #if defined(ARDUINO_TEENSY41)
+#include "ii/QuantizerAdapter.h"
 namespace OC {
 namespace {
 class IiBackend final : public phz::ii::Backend {
  public:
+  bool SnapshotHostIdentity(phz::ii::HostIdentity& out) override {
+    return app_switcher.current_app()->SnapshotIiIdentity(out);
+  }
+  phz::ii::HostActionResult ApplyHostAction(const phz::ii::HostAction& action) override {
+    struct PauseDsp {
+      bool previous = CORE::app_isr_enabled;
+      PauseDsp() { CORE::app_isr_enabled = false; }
+      ~PauseDsp() { CORE::app_isr_enabled = previous; }
+    } pause;
+    return app_switcher.current_app()->ApplyIiHostAction(action);
+  }
   bool Describe(const phz::ii::Write& write, phz::ii::Descriptor& out) override {
     return app_switcher.current_app()->DescribeIi(write, out);
   }
   bool Apply(const phz::ii::Prepared& update) override {
     return app_switcher.current_app()->ApplyIi(update);
+  }
+  bool ApplyQuantizer(const pc_qtz_request& request) override {
+    QuantizerCommand command;
+    if (!phz::ii::DecodeQuantizerRequest(request, command)) return false;
+    return ApplyActiveQuantizerCommand(command) ==
+           QuantizerCommandResult::Applied;
   }
 };
 }

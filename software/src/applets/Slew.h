@@ -69,14 +69,17 @@ public:
         }
     }
 
+    PHZ_APPLET_UI_CODE
     void View() {
         DrawIndicator();
     }
 
+    PHZ_APPLET_UI_CODE
     void OnButtonPress() {
         cursor = 1 - cursor;
     }
 
+    PHZ_APPLET_UI_CODE
     void OnEncoderMove(int direction) {
         AdjustParameterNative(cursor == 0 ? 1 : 2, direction);
     }

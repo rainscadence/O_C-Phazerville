@@ -56,6 +56,7 @@ public:
       attenuations[ch].Push(float_to_q15(level_cv.InF(1.0)));
     }
   }
+  PHZ_APPLET_UI_CODE
   void View() override {
     const char* const txt[] = {
       "Left", "Right", "Dual", "Mixed",
@@ -105,18 +106,20 @@ public:
     if (!DescribeParameter(1, mode) || !phz::parameters::NativeAllowed(mode, modesel_))
       modesel_ = LEFT; // Unavailable/corrupt saved modes never index the label table.
     level = constrain(level, LVL_MIN_DB - 1, LVL_MAX_DB);
-    if (!level_cv.SetSource(level_cv.Source())) level_cv.SetSource(0);
+    if (!level_cv.RestoreSource(level_cv.Source())) level_cv.SetSource(0);
     level_cv.attenuversion = constrain(level_cv.attenuversion, -127, 127);
     UpdateMix();
   }
 
   // *****
+  PHZ_APPLET_UI_CODE
   void OnButtonPress() override {
     if (CheckEditInputMapPress(cursor, IndexedInput(LEVEL_CV, level_cv)))
       return;
     CursorToggle();
   }
   // *****
+  PHZ_APPLET_UI_CODE
   void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, MAX_CURSOR);

@@ -290,6 +290,22 @@ protected:
     //                  "---------------------" <-- Extra text size guide
   }
 
+    CVInputMap* IiRecallInput(uint16_t field) override {
+      switch(field) {
+        case 0x100:return &cv_inputs[DUOTET_PARAM_TET];
+        case 0x101:return &cv_inputs[DUOTET_PARAM_INTERVALA];
+        case 0x102:return &cv_inputs[DUOTET_PARAM_INTERVALB];
+        case 0x103:return &cv_inputs[DUOTET_PARAM_SCALELEN];
+        case 0x104:return &cv_inputs[DUOTET_PARAM_OFFSET];
+        case 0x105:return &cv_inputs[DUOTET_PARAM_BpA];
+        case 0x106:return &cv_inputs[DUOTET_PARAM_Bp];
+        case 0x107:return &cv_inputs[DUOTET_PARAM_Bu];
+        case 0x108:return &cv_inputs[DUOTET_PARAM_Bl];
+        case 0x109:return &cv_inputs[DUOTET_PARAM_Au];
+        case 0x10a:return &cv_inputs[DUOTET_PARAM_Al];
+        default:return nullptr;
+      }
+    }
 private:
 
     typedef enum {

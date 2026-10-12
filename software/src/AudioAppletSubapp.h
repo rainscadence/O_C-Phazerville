@@ -473,9 +473,11 @@ public:
         PhzConfig::getValue(preset_key | key(STEREO_APPLETS, slot), data);
         int ix = get_stereo_applet_ix_by_id(slot, data, 0);
         if (data && stereo_appletIds[ix] != data) return;
+#ifdef PRINT_DEBUG
         Serial.printf("\n%lu: Loading applet id=", slot);
         Serial.print(data, HEX);
         Serial.printf(" ix=%d", ix);
+#endif
         ChangeStereoApplet(LEFT_HEMISPHERE, slot, ix);
 
         if (data) {
@@ -496,9 +498,11 @@ public:
           PhzConfig::getValue(preset_key | key(MONO_APPLETS, slot_key), data);
           int ix = get_mono_applet_ix_by_id(ch, slot, data, 0);
           if (data && mono_appletIds[ix] != data) return;
+#ifdef PRINT_DEBUG
           Serial.printf("\n%lu, %d: Loading applet id=", slot, ch);
           Serial.print(data, HEX);
           Serial.printf(" ix=%d", ix);
+#endif
           ChangeMonoApplet(ch, slot, ix);
 
           if (data) {
@@ -527,8 +531,10 @@ public:
     for (size_t slot = 0; slot < Slots; ++slot) {
       auto& stereo_applet = get_selected_stereo_applet(slot);
       applet_id = stereo_applet.applet_id();
+#ifdef PRINT_DEBUG
       Serial.printf("\n%lu: Saving applet id=", slot);
       Serial.print(applet_id, HEX);
+#endif
       PhzConfig::setValue(preset_key | key(STEREO_APPLETS, slot), applet_id);
 
       SaveAppletData(
@@ -541,8 +547,10 @@ public:
         uint8_t slot_key = slot + ch * Slots;
         auto& mono_applet = get_selected_mono_applet(ch, slot);
         applet_id = mono_applet.applet_id();
+#ifdef PRINT_DEBUG
         Serial.printf("\n%lu, %d: Saving applet id=", slot, ch);
         Serial.print(applet_id, HEX);
+#endif
         PhzConfig::setValue(preset_key | key(MONO_APPLETS, slot_key), applet_id);
 
         SaveAppletData(
@@ -559,10 +567,14 @@ public:
     array<uint64_t, APPLET_CONFIG_SIZE> data;
     for (uint_fast8_t i = 0; i < APPLET_CONFIG_SIZE; ++i) {
       if (PhzConfig::getValue(key + i, data[i])) {
+#ifdef PRINT_DEBUG
         Serial.printf(" | data[%u]=", i);
         Serial.print(data[i], HEX);
+#endif
       } else {
+#ifdef PRINT_DEBUG
         Serial.printf(" | no data[%u]", i);
+#endif
         data[i] = 0;
       }
     }
@@ -579,8 +591,10 @@ public:
       // We default to 0, so may as well skip them to save space
       if (data[i]) PhzConfig::setValue(key + i, data[i]);
       else PhzConfig::deleteKey(key + i); // clears old unused data
+#ifdef PRINT_DEBUG
       Serial.printf(" | data[%u]=", i);
       Serial.print(data[i], HEX);
+#endif
     }
   }
 

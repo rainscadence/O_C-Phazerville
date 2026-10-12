@@ -45,6 +45,31 @@ namespace HS {
   // global shared quantizers
   QuantEngine q_engine[QUANT_CHANNEL_COUNT];
 
+  bool ReadQuantizerSlot(unsigned slot, OC::QuantizerSettings& out) {
+    if (slot >= OC::QuantizerBank::kCount) return false;
+    const auto& source = q_engine[slot];
+    out.scale = source.scale;
+    out.root = source.root_note;
+    out.octave = source.octave;
+    out.mask = source.mask;
+    out.range = source.range;
+    return true;
+  }
+
+  bool ReplaceQuantizerSlot(
+      unsigned slot, const OC::QuantizerSettings& settings) {
+    if (!OC::QuantizerBank::Valid(slot, settings, OC::Scales::NUM_SCALES))
+      return false;
+    auto& target = q_engine[slot];
+    target.scale = settings.scale;
+    target.root_note = settings.root;
+    target.octave = settings.octave;
+    target.mask = settings.mask;
+    target.range = settings.range;
+    target.Reconfig();
+    return true;
+  }
+
   // for Beat Sync'd octave or key switching
   int next_ch = -1;
   int8_t next_octave, next_root_note;
@@ -86,8 +111,7 @@ namespace HS {
     return q_engine[index];
   }
 
-  FLASHMEM
-  void Init() {
+  FLASHMEM __attribute__((noinline)) void Init() {
     const int default_scales[8] = {
       OC::Scales::SCALE_SEMI + 0,
       OC::Scales::SCALE_SEMI + 1, // Ionian
@@ -110,8 +134,7 @@ namespace HS {
 
     ResetMappings();
   }
-  FLASHMEM
-  void ResetMappings() {
+  FLASHMEM __attribute__((noinline)) void ResetMappings() {
     for (int i = 0; i < APPLET_SLOTS * 2; ++i) {
       trigmap[i].SetGateInput(i % 4);
       trigmap[i].Reset(true);
@@ -126,12 +149,12 @@ namespace HS {
 
   }
 
-  void PokePopup(PopupType pop, const char* msg) {
+  FLASHMEM __attribute__((noinline)) void PokePopup(PopupType pop, const char* msg) {
     popup_msg = msg;
     popup_type = pop;
     popup_tick = OC::CORE::ticks;
   }
-  void PokePopup(PopupType pop, ErrMsgIndex err) {
+  FLASHMEM __attribute__((noinline)) void PokePopup(PopupType pop, ErrMsgIndex err) {
     popup_msg = OC::Strings::err_msg[err];
     popup_type = pop;
     popup_tick = OC::CORE::ticks;
@@ -144,7 +167,7 @@ namespace HS {
       next_ch = -1;
     }
   }
-  void QueueBeatSync() {
+  FLASHMEM __attribute__((noinline)) void QueueBeatSync() {
     if (clock_m.IsRunning())
       clock_m.BeatSync( &ProcessBeatSync );
     else
@@ -164,8 +187,13 @@ namespace HS {
   int QuantizerLookup(int ch, int note) {
     return q_engine[ch].Lookup(note);
   }
-  void QuantizerConfigure(int ch, int scale, uint16_t mask) {
+  FLASHMEM __attribute__((noinline)) void QuantizerConfigure(int ch, int scale, uint16_t mask) {
     q_engine[ch].Configure(scale, mask);
+  }
+  FLASHMEM __attribute__((noinline)) void RefreshUserQuantizers() {
+    for (auto &q : q_engine) {
+      if (q.scale < OC::Scales::SCALE_USER_COUNT) q.Reconfig();
+    }
   }
   int GetScale(int ch) {
     return q_engine[ch].scale;
@@ -173,11 +201,11 @@ namespace HS {
   int GetRootNote(int ch) {
     return q_engine[ch].root_note;
   }
-  int SetRootNote(int ch, int root) {
+  FLASHMEM __attribute__((noinline)) int SetRootNote(int ch, int root) {
     CONSTRAIN(root, 0, 11);
     return (q_engine[ch].root_note = root);
   }
-  void NudgeRootNote(int ch, int dir) {
+  FLASHMEM __attribute__((noinline)) void NudgeRootNote(int ch, int dir) {
     if (next_ch < 0) {
       next_ch = ch;
       next_root_note = q_engine[ch].root_note;
@@ -197,7 +225,7 @@ namespace HS {
 
     QueueBeatSync();
   }
-  void NudgeOctave(int ch, int dir) {
+  FLASHMEM __attribute__((noinline)) void NudgeOctave(int ch, int dir) {
     if (next_ch < 0) {
       next_ch = ch;
       next_root_note = q_engine[ch].root_note;
@@ -208,38 +236,47 @@ namespace HS {
 
     QueueBeatSync();
   }
-  void NudgeScale(int ch, int dir) {
+  FLASHMEM __attribute__((noinline)) void NudgeScale(int ch, int dir) {
     q_engine[ch].NudgeScale(dir);
   }
-  void RotateMask(int ch, int dir) {
+  FLASHMEM __attribute__((noinline)) void RotateMask(int ch, int dir) {
     q_engine[ch].RotateMask(dir);
   }
-  void QuantizerEdit(int ch) {
+  FLASHMEM __attribute__((noinline)) void QuantizerEdit(int ch) {
     qview = constrain(ch, 0, QUANT_CHANNEL_COUNT - 1);
     q_edit = 1;
   }
-  void QEditEncoderMove(bool rightenc, int dir) {
+  FLASHMEM __attribute__((noinline)) void QEditEncoderMove(bool rightenc, int dir) {
     if (!rightenc) {
       // left encoder moves q_edit cursor
       const int scale_size = q_engine[qview].Size();
-      q_edit = constrain(q_edit + dir, 1, 3 + scale_size);
+      q_edit = constrain(q_edit + dir, 1, 6 + scale_size);
     } else {
       // right encoder is delegated
       if (q_edit == 1) // scale
         NudgeScale(qview, dir);
       else if (q_edit == 2) // root
         NudgeRootNote(qview, dir);
-      else if (q_edit == 3) { // mask rotate
+      else if (q_edit == 3) { // range on/off
+        if (q_engine[qview].range.enabled())
+          q_engine[qview].range.Disable();
+        else
+          q_engine[qview].range.EnableDefault();
+      } else if (q_edit == 4) { // range low octave
+        q_engine[qview].range.AdjustLow(dir);
+      } else if (q_edit == 5) { // range high octave
+        q_engine[qview].range.AdjustHigh(dir);
+      } else if (q_edit == 6) { // mask rotate
         RotateMask(qview, dir);
       } else { // edit mask bits
-        const int idx = q_edit - 4;
+        const int idx = q_edit - 7;
         q_engine[qview].EditMask(idx, dir>0);
         q_engine[qview].Reconfig();
       }
     }
   }
   // -----
-  void MidiMapEdit(int ch) {
+  FLASHMEM __attribute__((noinline)) void MidiMapEdit(int ch) {
     mview = constrain(ch, 0, MIDIMAP_MAX - 1);
     midi_edit = 1;
   }
@@ -251,7 +288,7 @@ namespace HS {
 
     MEDITCURSOR_COUNT
   };
-  void MEditEncoderMove(bool rightenc, int dir) {
+  FLASHMEM __attribute__((noinline)) void MEditEncoderMove(bool rightenc, int dir) {
     if (!rightenc) {
       // left encoder moves midi_edit cursor
       midi_edit = constrain(midi_edit + dir, 1, MEDITCURSOR_COUNT-1);
@@ -282,7 +319,7 @@ namespace HS {
     }
   }
 
-  void DrawMidiMaps(int curpos) {
+  FLASHMEM __attribute__((noinline)) void DrawMidiMaps(int curpos) {
     const int w = 16;
     const int h = 13;
     CVInputMap cv_;
@@ -300,7 +337,7 @@ namespace HS {
     int cury = 12 + (curpos / 8) * h;
     gfxIcon(curx, cury, LEFT_ICON);
   }
-  void DrawConfigRow(int row, int y, bool cur, bool editing) {
+  FLASHMEM __attribute__((noinline)) void DrawConfigRow(int row, int y, bool cur, bool editing) {
     switch (row) {
       case 0:
         gfxPrint(1, y, "Trig Length:  ");
@@ -437,7 +474,7 @@ namespace HS {
       if (editing) gfxInvert(82, y - 1, 45, 10);
     }
   }
-  void DrawPopup(const int config_cursor, const int preset_id, const bool blink) {
+  FLASHMEM void DrawPopup(const int config_cursor, const int preset_id, const bool blink) {
 
     enum ConfigCursor {
         DELETE_PRESET,
@@ -462,9 +499,12 @@ namespace HS {
         pw = 54; ph = 38;
         break;
       case MIDI_POPUP:
-      case QUANTIZER_POPUP:
         px = 14; py = 23;
         pw = 100; ph = 28;
+        break;
+      case QUANTIZER_POPUP:
+        px = 14; py = 13;
+        pw = 100; ph = 38;
         break;
       case MESSAGE_POPUP:
         pw = 6 * strlen(popup_msg) + 10;
@@ -539,6 +579,17 @@ namespace HS {
         if (octave >= 0) graphics.print("+");
         graphics.print(octave);
 
+        gfxPrint(24, 29, "Range ");
+        if (!q.range.enabled()) {
+          gfxPrint("Off");
+        } else {
+          if (q.range.low() >= 0) gfxPrint("+");
+          gfxPrint(q.range.low());
+          gfxPrint("..");
+          if (q.range.high() >= 0) gfxPrint("+");
+          gfxPrint(q.range.high());
+        }
+
         // scale mask
         const size_t scale_size = q.Size();
         for (size_t i = 0; i < scale_size; ++i) {
@@ -552,11 +603,17 @@ namespace HS {
 
         if (q_edit) {
           if (q_edit < 3) // scale or root
-            gfxIcon(26 + 26*q_edit, 35, UP_BTN_ICON);
-          else if (q_edit == 3) // mask rotate
+            gfxIcon(26 + 26*q_edit, 25, UP_BTN_ICON);
+          else if (q_edit == 3) // range on/off
+            gfxFrame(22, 28, 79, 9, true);
+          else if (q_edit == 4) // range low
+            gfxIcon(58, 36, UP_BTN_ICON);
+          else if (q_edit == 5) // range high
+            gfxIcon(84, 36, UP_BTN_ICON);
+          else if (q_edit == 6) // mask rotate
             gfxFrame(23, 39, 81, 6, true);
           else
-            gfxIcon(22 + (q_edit-4)*5, 44, UP_BTN_ICON);
+            gfxIcon(22 + (q_edit-7)*5, 44, UP_BTN_ICON);
 
           gfxInvert(px, py, pw, ph);
 
@@ -603,7 +660,7 @@ namespace HS {
     }
   }
 
-  void ToggleClockRun() {
+  FLASHMEM __attribute__((noinline)) void ToggleClockRun() {
     if (clock_m.IsRunning()) {
       clock_m.Stop();
     } else {
@@ -618,7 +675,7 @@ namespace HS {
   const uint8_t * get_applet_icon(const int index);
 
   FLASHMEM
-  void DrawAppletList(bool blink) {
+  FLASHMEM __attribute__((noinline)) void DrawAppletList(bool blink) {
     const size_t LineH = 12;
 
     int y = (64 - (5 * LineH)) / 2;

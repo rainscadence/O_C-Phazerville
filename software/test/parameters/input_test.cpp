@@ -72,7 +72,7 @@ template<AudioChannels C>void Parameters(){
   const auto before=State(a);int32_t saved[4];for(int p=1;p<=4;++p)saved[p-1]=Read(a,p);
   bool valid=true;int expected=0;
   if(id==1){valid=LegalMode<C>(code);expected=code;}
-  else if(id==3){valid=code<=57;if(valid)expected=code==0?0:code<=8?63+code:code<=24?87+code:code<=56?103+code:224;}
+  else if(id==3){valid=code<=89;if(valid)expected=code==0?0:code<=8?63+code:code<=24?87+code:code<=56?103+code:code==57?224:134+code;}
   else{const int lo=id==2?-91:-127,hi=id==2?90:127;expected=lo+int((int64_t(hi-lo)*code+32767)/65535);}
   Send(a,id,code,valid);
   if(valid)assert(Read(a,id)==expected);else assert(State(a)==before);
@@ -173,6 +173,13 @@ template<AudioChannels C>void Export(){
  }
 }
 int main(int argc,char** argv){
+ for(unsigned slot=0;slot<32;++slot) {
+  phz::ii::virtual_inputs.Reset();InputApplet<MONO> a{};
+  Preset(a,0,-6,192+slot,-60);const auto saved=State(a);
+  assert(phz::ii::virtual_inputs.SetRange(slot,phz::ii::VirtualInputs::Range::Off));
+  a.OnDataReceive(saved);assert(State(a)==saved);
+ }
+ phz::ii::virtual_inputs.Reset();
  const std::string mode=argc>1?argv[1]:"";
  if(mode=="--unload"){UnloadChecks<MONO>();UnloadChecks<STEREO>();return 0;}
  if(mode=="--restore"){PresetChecks<MONO>();PresetChecks<STEREO>();return 0;}

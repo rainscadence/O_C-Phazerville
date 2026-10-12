@@ -107,11 +107,15 @@ struct Registry {
             return nullptr;
         }
         if (!instances[slot][idx]) {
+#ifdef PRINT_DEBUG
             Serial.printf("Free RAM: %d\n", OC::CORE::FreeRam());
             Serial.printf("AppletRegistry: new - ID: %u Index: %d Slot: %u\n", id, idx, slot);
+#endif
             instances[slot][idx] = factories[idx]();
+#ifdef PRINT_DEBUG
             if (instances[slot][idx])
               Serial.println(instances[slot][idx]->applet_name());
+#endif
         }
         return instances[slot][idx];
     }

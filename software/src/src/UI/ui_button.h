@@ -40,8 +40,8 @@ public:
   }
 
   // @return True if pressed
-  uint8_t Poll() {
-    uint8_t state = (state_ << 1) | digitalReadFast(pin_);
+  uint8_t Poll(bool synthetic_pressed = false) {
+    uint8_t state = (state_ << 1) | (synthetic_pressed ? 0 : digitalReadFast(pin_));
     state_ = state;
     return !(state & 0x01);
   }

@@ -18,7 +18,7 @@ FLASHMEM
 void Scales::Validate() {
   // protecc from garbage EEPROM data
   for (size_t i = 0; i < SCALE_USER_COUNT; ++i) {
-    CONSTRAIN(user_scales[i].num_notes, 4, 16);
+    CONSTRAIN(user_scales[i].num_notes, kMinScaleLength, kMaxScaleLength);
     CONSTRAIN(user_scales[i].span, 12 << 7, 24 << 7);
     // TODO: note values?
   }
@@ -67,7 +67,7 @@ void Scales::LoadScala(Scale &scale, File &file) {
 
   // next line - number of notes
   scale.num_notes = buf.toInt();
-  CONSTRAIN(scale.num_notes, 2, 16);
+  CONSTRAIN(scale.num_notes, kMinScaleLength, kMaxScaleLength);
 
   bool largespan = false;
   scale.notes[0] = 0;

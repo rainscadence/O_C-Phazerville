@@ -249,7 +249,8 @@ constexpr Registry reg = Registry<HemisphereApplet, HS::APPLET_SLOTS
 
 
 namespace HS {
-  static constexpr auto appletIds = reg.getIds();
+  // Immutable identity catalogue; keep it in flash instead of consuming DTCM.
+  static constexpr auto appletIds PROGMEM = reg.getIds();
   constexpr int HEMISPHERE_AVAILABLE_APPLETS = appletIds.size();
 
   uint64_t hidden_applets[2] = { 0, 0 };

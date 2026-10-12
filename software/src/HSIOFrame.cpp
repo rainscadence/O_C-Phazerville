@@ -2,6 +2,9 @@
 #include "HSMIDI.h"
 #include "HSUtils.h"
 #include "HSIOFrame.h"
+#if defined(ARDUINO_TEENSY41)
+#include "ii/Follower.h"
+#endif
 
 const int HS::MIDIMapping::ViewOut() const {
   if (IsPitch()) return output + Proportion(pitch_bend, 8192, frame.MIDIState.bend_range << 7);
@@ -330,74 +333,77 @@ bool HS::MIDIMapping::ProcessMsg(const MIDIMessage msg, HS::MIDIFrame &state) {
   return log_this;
 }
 
-void HS::MIDIFrame::Send(const SlewedValue *outvals) {
-    // first pass - calculate things and turn off notes
-    for (int i = 0; i < DAC_CHANNEL_COUNT; ++i) {
-        const uint8_t midi_ch = outmap[i].get_channel();
+namespace {
+// Exact old ports are retained for note-off cleanup even after port gating
+// changes. This sender never modifies the explicit applets' current_note cache.
+struct AutoMidiSink {
+  void Message(bool cc, bool on, uint8_t ch, uint8_t number, uint8_t value, uint8_t ports) {
+    auto send = [&](auto& port) {
+      if (cc) port.sendControlChange(number, value, ch + 1);
+      else if (on) port.sendNoteOn(number, value, ch + 1);
+      else port.sendNoteOff(number, 0, ch + 1);
+    };
+    if (ports & HS::mMaskUSBDev) send(usbMIDI);
+#if defined(ARDUINO_TEENSY41)
+    if (ports & HS::mMaskSerial) send(MIDI1);
+    if (ports & HS::mMaskUSBHost) send(usbHostMIDI[0]);
+    if (ports & HS::mMaskUSBHost2) send(usbHostMIDI[1]);
+#endif
+  }
+  void Note(bool on, uint8_t ch, uint8_t note, uint8_t ports) {
+    Message(false, on, ch, note, 100, ports);
+  }
+  void CC(uint8_t ch, uint8_t cc, uint8_t value, uint8_t ports) {
+    Message(true, false, ch, cc, value, ports);
+  }
+};
+}
 
-        int input = outvals[i].get();
-        gate_high[i] = input > (12 << 7);
-        clocked[i] = (gate_high[i] && last_cv[i] < (12 << 7));
-        if (abs(input - last_cv[i]) > HEMISPHERE_CHANGE_THRESHOLD) {
-            changed_cv[i] = 1;
-            last_cv[i] = input;
-        } else changed_cv[i] = 0;
-
-        // outmaps don't discriminate on subtypes, we keep it simple
-        switch (outmap[i].get_type()) {
-          case MIDIMapSettings::PITCH:
-            if (changed_cv[i]) {
-              // a note has changed, turn the last one off first
-              SendNoteOff(outchan_last[i]);
-              current_note[midi_ch] = MIDIQuantizer::NoteNumber(input);
-            }
-            break;
-
-          case MIDIMapSettings::GATE:
-            if (!gate_high[i] && changed_cv[i])
-              SendNoteOff(midi_ch);
-            break;
-
-          case MIDIMapSettings::CCONTROL: {
-            const uint8_t newccval = ProportionCV(abs(input), 127);
-            if (newccval != current_ccval[i]) {
-              SendCC(midi_ch, outmap[i].get_subtype(), newccval);
-              current_ccval[i] = newccval;
-            }
-            break;
-          }
-
-          default: break;
-        }
-
-        // Handle clock pulse timing
-        if (note_countdown[i] > 0) {
-            if (--note_countdown[i] == 0) SendNoteOff(outchan_last[i]);
-        }
+void HS::MIDIFrame::Send(const int32_t (&values)[DAC_CHANNEL_COUNT],
+                        const phz::routing::OutputRouting<DAC_CHANNEL_COUNT>& routes,
+                        bool enabled) {
+  using Engine = phz::routing::AutoMidi<DAC_CHANNEL_COUNT>;
+  Engine::Config config[DAC_CHANNEL_COUNT];
+  Engine::Value samples[DAC_CHANNEL_COUNT];
+  for (size_t i = 0; i < DAC_CHANNEL_COUNT; ++i) {
+    auto& c = config[i];
+    const auto& map = outmap[i];
+    c.enabled = enabled && routes.MidiEnabled(i);
+    c.channel = map.get_channel();
+    c.controller = map.get_subtype();
+    if (map.get_type() == MIDIMapSettings::PITCH) c.kind = Engine::Kind::Pitch;
+    else if (map.get_type() == MIDIMapSettings::GATE) c.kind = Engine::Kind::Gate;
+    else if (map.get_type() == MIDIMapSettings::CCONTROL) c.kind = Engine::Kind::CC;
+    samples[i].gate = values[i] > (12 << 7);
+    if (c.kind == Engine::Kind::Pitch) {
+      // Avoid signed overflow in the quantizer's rounding addition.
+      const int cv = constrain(values[i], -1048576, 1048576);
+      samples[i].code = MIDIQuantizer::NoteNumber(cv, map.get_transpose());
+    } else if (c.kind == Engine::Kind::CC) {
+      // Preserve legacy magnitude conversion, with explicit range saturation.
+      int64_t magnitude = values[i] < 0 ? -int64_t(values[i]) : values[i];
+      if (magnitude > HEMISPHERE_MAX_CV) magnitude = HEMISPHERE_MAX_CV;
+      samples[i].code = ProportionCV(int(magnitude), 127);
     }
+  }
+#if defined(ARDUINO_TEENSY41)
+  const uint8_t ports = ~midi_msgtx_disable &
+    (mMaskUSBDev | mMaskSerial | mMaskUSBHost | mMaskUSBHost2);
+#else
+  const uint8_t ports = mMaskUSBDev;
+#endif
+  AutoMidiSink sink;
+  automatic_output.Tick(config, samples, ports, HEMISPHERE_CLOCK_TICKS * trig_length, sink);
+}
 
-    // 2nd pass - send eligible notes
-    for (int i = 0; i < 2; ++i) {
-        const int chA = i*2;
-        const int chB = chA + 1;
-
-        if (outmap[chB].IsGate()) {
-            if (clocked[chB]) {
-                SendNoteOn(outmap[chB].get_channel());
-                // no countdown
-                outchan_last[chB] = outmap[chB].get_channel();
-            }
-        } else if (outmap[chA].IsPitch()) {
-            if (changed_cv[chA]) {
-                SendNoteOn(outmap[chA].get_channel());
-                note_countdown[chA] = HEMISPHERE_CLOCK_TICKS * trig_length;
-                outchan_last[chA] = outmap[chA].get_channel();
-            }
-        }
-    }
-
-    // I think this can cause the UI to lag and miss input
-    //usbMIDI.send_now();
+void HS::MIDIFrame::StopAutoOutput(int pair) {
+  // UI lifecycle calls must not race the app ISR. USB interrupts stay enabled.
+  const bool previous = OC::CORE::app_isr_enabled;
+  OC::CORE::app_isr_enabled = false;
+  AutoMidiSink sink;
+  if (pair < 0) automatic_output.Stop(sink);
+  else automatic_output.StopPair(size_t(pair), sink);
+  OC::CORE::app_isr_enabled = previous;
 }
 
 void HS::IOFrame::Load(OC::IOFrame *ioframe) {
@@ -474,7 +480,11 @@ void HS::IOFrame::Load(OC::IOFrame *ioframe) {
     }
 }
 
-void HS::IOFrame::Send(OC::IOFrame *ioframe) {
+void HS::IOFrame::Send(OC::IOFrame *ioframe, uint32_t output_epoch) {
+    int32_t published[DAC_CHANNEL_COUNT]{};
+#if !defined(ARDUINO_TEENSY41)
+    (void)output_epoch;
+#endif
     const DAC_CHANNEL chan[DAC_CHANNEL_COUNT] = {
       DAC_CHANNEL_A, DAC_CHANNEL_B, DAC_CHANNEL_C, DAC_CHANNEL_D,
 #ifdef ARDUINO_TEENSY41
@@ -509,9 +519,19 @@ void HS::IOFrame::Send(OC::IOFrame *ioframe) {
        */
 
       outputs[i].push(output_slew[i]);
-      if (i < DAC_CHANNEL_COUNT)
-        ioframe->outputs.set_pitch_value(chan[i], outputs[i].get(output_atten[i]));
+      if (i < DAC_CHANNEL_COUNT) {
+        const int value = outputs[i].get(output_atten[i]);
+        published[i] = value;
+      }
     }
+    int32_t physical[DAC_CHANNEL_COUNT];
+    output_routes.Render(published, physical);
+    for (int i = 0; i < DAC_CHANNEL_COUNT; ++i)
+      ioframe->outputs.set_pitch_value(chan[i], physical[i]);
+#if defined(ARDUINO_TEENSY41)
+    phz::ii::PublishOutputs(output_epoch, published, DAC_CHANNEL_COUNT);
+#endif
 
-    if (autoMIDIOut) MIDIState.Send(outputs);
+    // Also tick when disabled so previously-owned notes receive note-off.
+    MIDIState.Send(published, output_routes, autoMIDIOut);
 }

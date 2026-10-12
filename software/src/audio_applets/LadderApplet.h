@@ -1,7 +1,11 @@
+#pragma once
+#include "../parameters/CvMapping.h"
+
 template <AudioChannels Channels>
 class LadderApplet : public HemisphereAudioApplet {
 
 public:
+  phz::parameters::Schema Parameters() const override;
   const char* applet_name() {
     return "LadderLPF";
   }
@@ -22,6 +26,7 @@ public:
     }
   }
 
+  PHZ_APPLET_UI_CODE
   void View() override {
     const int label_x = 1;
     gfxStartCursor(label_x, 15);
@@ -58,6 +63,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
+  PHZ_APPLET_UI_CODE
   void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
@@ -70,36 +76,46 @@ public:
     CursorToggle();
   }
 
+  PHZ_APPLET_UI_CODE
   void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, 7);
       return;
     }
-    if(EditSelectedInputMap(direction)) return;
+    if (IsEditingInputMap()) {
+      auto map = std::get_if<CVInputMap*>(&selected_input_map);
+      if (map && *map == &pitch_cv) AdjustParameterNative(6, direction);
+      else if (map && *map == &pitch_cv2) AdjustParameterNative(8, direction);
+      else if (map && *map == &res_cv) AdjustParameterNative(10, direction);
+      else if (map && *map == &gain_cv) AdjustParameterNative(12, direction);
+      return;
+    }
     switch (cursor) {
       case 0:
-        pitch = constrain(pitch + direction * 16, -8 * 12 * 128, 8 * 12 * 128);
+        SetParameterNative(1, constrain(
+          int64_t(pitch) + int64_t(direction) * 16,
+          int64_t(-8 * 12 * 128), int64_t(8 * 12 * 128)));
         break;
       case 1:
-        pitch_cv.ChangeSource(direction);
+        ChangeParameterSource(5, pitch_cv, direction);
         break;
       case 2:
-        pitch_cv2.ChangeSource(direction);
+        ChangeParameterSource(7, pitch_cv2, direction);
         break;
       case 3:
-        res = constrain(res + direction, 0, 180);
+        AdjustParameterNative(2, direction);
         break;
       case 4:
-        res_cv.ChangeSource(direction);
+        ChangeParameterSource(9, res_cv, direction);
         break;
       case 5:
-        gain = constrain(gain + direction, 0, 400);
+        AdjustParameterNative(3, direction);
         break;
       case 6:
-        gain_cv.ChangeSource(direction);
+        ChangeParameterSource(11, gain_cv, direction);
         break;
       case 7:
-        pb_gain = constrain(pb_gain + direction, 0, 50);
+        AdjustParameterNative(4, direction);
         break;
     }
   }
@@ -112,6 +128,14 @@ public:
   void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) {
     UnpackPackables(data[0], pitch, res, gain, pb_gain);
     UnpackPackables(data[1], pitch_cv, res_cv, gain_cv, pitch_cv2);
+    pitch = constrain(pitch, -8 * 12 * 128, 8 * 12 * 128);
+    res = constrain(res, 0, 180);
+    gain = constrain(gain, 0, 400);
+    pb_gain = constrain(pb_gain, 0, 50);
+    for (auto* map : {&pitch_cv, &pitch_cv2, &res_cv, &gain_cv}) {
+      if (!map->RestoreSource(map->Source())) map->SetSource(0);
+      map->attenuversion = constrain(map->attenuversion, -127, 127);
+    }
   }
 
   AudioStream* InputStream() override {
@@ -125,6 +149,12 @@ protected:
   void SetHelp() override {}
 
 private:
+  void ChangeParameterSource(uint16_t id, const CVInputMap& map, int direction) {
+    auto next = map;
+    next.ChangeSource(direction);
+    SetParameterNative(id, next.Source());
+  }
+
   int8_t cursor = 0;
   int16_t pitch = 1 * 12 * 128; // C4
   int16_t res = 0;
@@ -139,3 +169,29 @@ private:
   std::array<AudioFilterLadder, Channels> filters;
   AudioPassthrough<Channels> output;
 };
+
+template <AudioChannels Channels>
+phz::parameters::Schema PHZ_PARAMETER_CODE LadderApplet<Channels>::Parameters() const {
+  using namespace phz::parameters;
+  using App = LadderApplet<Channels>;
+  using Pitch = CvMapping<App, &App::pitch_cv>;
+  using Pitch2 = CvMapping<App, &App::pitch_cv2>;
+  using Res = CvMapping<App, &App::res_cv>;
+  using Gain = CvMapping<App, &App::gain_cv>;
+  static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {
+    Field<App, &App::pitch>::Make(1, "pitch", "Cutoff pitch", "pitch128", -12288, 12288),
+    Field<App, &App::res>::Make(2, "res", "Resonance", "percent", 0, 180),
+    Field<App, &App::gain>::Make(3, "gain", "Input drive", "percent", 0, 400),
+    Field<App, &App::pb_gain>::Make(4, "pb_gain", "Passband gain", "percent", 0, 50),
+    Pitch::Source(5, "pitch_cv.source", "Pitch CV source"),
+    Pitch::Attenuversion(6, "pitch_cv.attenuversion", "Pitch CV amount"),
+    Pitch2::Source(7, "pitch_cv2.source", "Pitch CV 2 source"),
+    Pitch2::Attenuversion(8, "pitch_cv2.attenuversion", "Pitch CV 2 amount"),
+    Res::Source(9, "res_cv.source", "Resonance CV source"),
+    Res::Attenuversion(10, "res_cv.attenuversion", "Resonance CV amount"),
+    Gain::Source(11, "gain_cv.source", "Drive CV source"),
+    Gain::Attenuversion(12, "gain_cv.attenuversion", "Drive CV amount"),
+  };
+  static_assert(Valid(entries), "Invalid Ladder parameter schema");
+  return {entries, sizeof(entries) / sizeof(entries[0])};
+}

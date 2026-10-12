@@ -58,7 +58,7 @@ void AllocationChecks(){
 void MapChecks(){
  CVInputMap map{};
  for(int source=0;source<=255;++source){
-  const bool valid=source==0||(source>=64&&source<72)||(source>=96&&source<112)||(source>=128&&source<160)||source==224;
+  const bool valid=source==0||(source>=64&&source<72)||(source>=96&&source<112)||(source>=128&&source<160)||(source>=192&&source<224)||source==224;
   const auto old=map.Pack();
   assert(map.SetSource(source)==valid);if(!valid)assert(map.Pack()==old);else assert(map.Source()==source);
   for(int atten=-127;atten<=127;++atten){
@@ -67,7 +67,7 @@ void MapChecks(){
   }
  }
  // Restored invalid type must not make source cycling read outside ordered_types.
- map.Unpack(0xc0);map.ChangeSource(1);assert(map.Source()==64);
+ map.Unpack(0xa0);map.ChangeSource(1);assert(map.Source()==64);
  puts("Actual CV mapping: native source rejection/isolation, negative attenuation packing PASS");
 }
 template<AudioChannels C>void Parameters(){
@@ -78,13 +78,13 @@ template<AudioChannels C>void Parameters(){
    const bool enumeration=id==2||id==6;const auto before=State(app);
    int32_t expected=0;
    if(enumeration){
-    if(code<=57){expected=code==0?0:code<=8?63+code:code<=24?87+code:code<=56?103+code:224;}
+    if(code<=89){expected=code==0?0:code<=8?63+code:code<=24?87+code:code<=56?103+code:code==57?224:134+code;}
    }else{
     phz::parameters::Domain d;assert(app.DescribeParameter(id,d));
     expected=d.kind==Kind::Boolean?int(code>=32768):d.minimum+int((int64_t(d.maximum-d.minimum)*code+32767)/65535);
    }
    int32_t saved[9];for(uint16_t p=1;p<=9;++p)saved[p-1]=Read(app,p);
-   const bool valid=!enumeration||code<=57;
+   const bool valid=!enumeration||code<=89;
    Send(app,slot,id,code,valid);
    if(valid)assert(Read(app,id)==expected);else assert(State(app)==before);
    for(uint16_t p=1;p<=9;++p)if(p!=id)assert(Read(app,p)==saved[p-1]);
@@ -160,6 +160,16 @@ template<AudioChannels C>void Export(){
  }
 }
 int main(int argc,char** argv){
+ for (unsigned slot=0;slot<32;++slot) {
+  phz::ii::virtual_inputs.Reset();
+  VcaApplet<MONO> a{};
+  Preset(a,-6,-12,50,192+slot,192+slot,-60,60);
+  const auto saved=State(a);
+  assert(phz::ii::virtual_inputs.SetRange(slot,phz::ii::VirtualInputs::Range::Off));
+  a.OnDataReceive(saved);
+  assert(State(a)==saved); // legacy disabled input binding must not disappear
+ }
+ phz::ii::virtual_inputs.Reset();
  if(argc>1&&std::string(argv[1])=="--negative"){
   VcaApplet<MONO> a{};a.Start();Preset(a,0,-91,1,64,0,-120);
   frame.adc[0]=HEMISPHERE_MAX_INPUT_CV;

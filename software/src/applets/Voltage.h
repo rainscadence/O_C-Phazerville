@@ -55,12 +55,14 @@ public:
         }
     }
 
+    PHZ_APPLET_UI_CODE
     void View() {
         DrawInterface();
     }
 
     //void OnButtonPress() { }
 
+    PHZ_APPLET_UI_CODE
     void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, 3);

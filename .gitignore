@@ -16,3 +16,6 @@ builds
 compile_commands.json
 *.hex
 *.swp
+__pycache__/
+*.pyc
+software/firmware.map

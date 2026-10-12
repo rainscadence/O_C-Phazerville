@@ -41,6 +41,7 @@ public:
     cv_stream.Push(float_to_q15(invert ? -cv : cv));
   }
 
+  PHZ_APPLET_UI_CODE
   void View() {
     gfxPrint(1, 15, "Lvl:");
     gfxStartCursor();
@@ -76,6 +77,7 @@ public:
     gfxDisplayInputMapEditor();
   }
 
+  PHZ_APPLET_UI_CODE
   void OnButtonPress() override {
     if (CheckEditInputMapPress(
           cursor,
@@ -86,6 +88,7 @@ public:
     CursorToggle();
   }
 
+  PHZ_APPLET_UI_CODE
   void OnEncoderMove(int direction) {
     if (!EditMode()) {
       MoveCursor(cursor, direction, NUM_PARAMS - 1);
@@ -175,7 +178,7 @@ protected:
 
 private:
   static void SanitizeMap(CVInputMap& map) {
-    if (!map.SetSource(map.Source())) map.SetSource(0);
+    if (!map.RestoreSource(map.Source())) map.SetSource(0);
     map.attenuversion = constrain(map.attenuversion, -127, 127);
   }
 

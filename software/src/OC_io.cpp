@@ -88,6 +88,7 @@ static void IOFrameToChannel(DAC_CHANNEL channel, const IOFrame *ioframe, const 
                   io_settings->autotune_data_enabled(channel));
     break;
     case OUTPUT_MODE_GATE:  value = DAC::GateToDAC(channel, value); break;
+    case OUTPUT_MODE_GATE_5V: value = DAC::GateToDAC(channel, value, 5); break;
     case OUTPUT_MODE_UNI:   value += DAC::get_zero_offset(channel); break;
     case OUTPUT_MODE_RAW:   break;
   }

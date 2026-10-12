@@ -42,7 +42,7 @@ void HemisphereApplet::BaseView(bool full_screen, bool parked) const {
     else this->View();
 }
 
-void HemisphereApplet::DrawConfigHelp() const {
+FLASHMEM void HemisphereApplet::DrawConfigHelp() const {
     for (int i=0; i<HELP_LABEL_COUNT; ++i) help[i] = "";
     SetHelp();
     const bool clockrun = HS::clock_m.IsRunning();
@@ -78,7 +78,8 @@ void HemisphereApplet::DrawConfigHelp() const {
       y += 10;
 
       graphics.setPrintPos(6 + ch*64, y);
-      graphics.print( OC::Strings::capital_letters[ ch + io_offset ] );
+      const auto destination = HS::frame.output_routes.Destination(ch + io_offset);
+      graphics.print(destination ? OC::Strings::capital_letters[destination-1] : "-");
       graphics.invertRect(ch*64, y - 1, 19, 9);
 
       graphics.setPrintPos(ch*64 + 20, y);

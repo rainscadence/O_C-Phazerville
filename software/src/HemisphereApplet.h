@@ -115,6 +115,8 @@ public:
     virtual void OnButtonPress() { CursorToggle(); };
     virtual void OnEncoderMove(int direction) = 0;
     virtual void Unload() { }
+    // Stable ii-only private input identities. Shared inputs need no override.
+    virtual CVInputMap* IiRecallInput(uint16_t) { return nullptr; }
     // Immutable descriptor snapshot; no allocation, I/O or lifecycle changes.
     virtual bool DescribeIiParameter(uint16_t id, phz::ii::Descriptor& out) const {
       return phz::ii::DescribeSettings(*this, id, out);
@@ -173,7 +175,7 @@ public:
     }
 
     /* Formerly Help Screen */
-    void DrawConfigHelp() const;
+    FLASHMEM __attribute__((noinline)) void DrawConfigHelp() const;
 
     // --- Cursor stuff
     static void ProcessCursors() {

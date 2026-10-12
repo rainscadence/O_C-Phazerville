@@ -98,7 +98,8 @@ public:
 
             // Decode length
             uint8_t num_notes = V[ix++];
-            OC::user_scales[current_scale].num_notes = constrain(num_notes, 4, 16);
+            OC::user_scales[current_scale].num_notes = constrain(
+                num_notes, OC::kMinScaleLength, OC::kMaxScaleLength);
 
             // Decode values
             for (int i = 0; i < 16; i++)
@@ -278,7 +279,8 @@ private:
             return;
         }
 
-        length = constrain(length + direction, 4, 16);
+        length = constrain(length + direction, OC::kMinScaleLength,
+                           OC::kMaxScaleLength);
         OC::user_scales[current_scale].num_notes = length;
         if (current_note > (length - 1)) current_note = length - 1;
 
@@ -363,6 +365,7 @@ FLASHMEM
 void AppScaleEditor::HandleAppEvent(OC::AppEvent event) {
     if (event == OC::APP_EVENT_SUSPEND) {
         OnSendSysEx();
+        HS::RefreshUserQuantizers();
     }
     if (event == OC::APP_EVENT_RESUME) {
         Resume();

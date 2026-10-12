@@ -37,6 +37,9 @@ using simfloat = int32_t;
 #include "HSClockManager.h"
 #include "HemisphereApplet.h"
 #include "HSUtils.h"
+#if defined(ARDUINO_TEENSY41)
+#include "ii/Follower.h"
+#endif
 
 #define HSAPPLICATION_CURSOR_TICKS 4000
 #define HSAPPLICATION_5V 7680
@@ -72,6 +75,11 @@ public:
     virtual void Resume() = 0;
 
     void BaseController(OC::IOFrame *ioframe) {
+#if defined(ARDUINO_TEENSY41)
+        const auto output_epoch = phz::ii::CaptureOutputEpoch();
+#else
+        const uint32_t output_epoch = 0;
+#endif
         // Load the IO frame from CV inputs
         HS::frame.Load(ioframe);
 
@@ -81,7 +89,7 @@ public:
         Controller();
 
         // set outputs from IO frame
-        HS::frame.Send(ioframe);
+        HS::frame.Send(ioframe, output_epoch);
     }
 
     void BaseStart() {

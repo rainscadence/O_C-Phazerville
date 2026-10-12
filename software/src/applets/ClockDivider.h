@@ -71,12 +71,14 @@ public:
         }
     }
 
+    PHZ_APPLET_UI_CODE
     void View() {
         DrawSelector();
     }
 
     //void OnButtonPress() { }
 
+    PHZ_APPLET_UI_CODE
     void OnEncoderMove(int direction) {
         if (!EditMode()) {
             MoveCursor(cursor, direction, LAST_SETTING);

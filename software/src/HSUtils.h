@@ -5,6 +5,8 @@
 #include "OC_gpio.h"
 #include "OC_scales.h"
 #include "PackingUtils.h"
+#include "quantizer/OctaveWindow.h"
+#include "quantizer/QuantizerBank.h"
 #include "src/extern/peaks_multistage_envelope.h"
 #include "util/util_semitone_quantizer.h"
 #include "util/util_turing.h"
@@ -140,6 +142,7 @@ namespace HS {
     int8_t root_note = 0;
     int8_t octave = 0;
     uint16_t mask = 0xffff;
+    OC::OctaveWindow range;
   };
   struct QuantEngine : public QuantEngineSettings {
     braids::Quantizer quantizer;
@@ -188,10 +191,14 @@ namespace HS {
 
     int Process(int cv, int root, int transpose) {
       if (root == 0) root = (root_note << 7);
-      return quantizer.Process(cv, root, transpose) + (octave * ONE_OCTAVE);
+      int pitch = quantizer.Process(cv, root, transpose);
+      pitch = range.Apply(pitch, ONE_OCTAVE);
+      return pitch + (octave * ONE_OCTAVE);
     }
     int Lookup(int note) {
-      return quantizer.Lookup(note) + (root_note << 7) + (octave * ONE_OCTAVE);
+      int pitch = quantizer.Lookup(note) + (root_note << 7);
+      pitch = range.Apply(pitch, ONE_OCTAVE);
+      return pitch + (octave * ONE_OCTAVE);
     }
 
     const int Size() {
@@ -216,6 +223,10 @@ namespace HS {
   // input quantizers, because sometimes we need hysteresis
   extern util::SemitoneQuantizer input_quant[ADC_CHANNEL_COUNT];
   extern QuantEngine q_engine[QUANT_CHANNEL_COUNT];
+
+  bool ReadQuantizerSlot(unsigned slot, OC::QuantizerSettings& out);
+  bool ReplaceQuantizerSlot(unsigned slot,
+                            const OC::QuantizerSettings& settings);
 
 #if defined(ARDUINO_TEENSY41) || defined(VOR)
   extern int octave_max;
@@ -242,32 +253,34 @@ namespace HS {
 
   extern OC::menu::ScreenCursor<5> showhide_cursor;
 
-  void Init();
-  void ResetMappings();
-  void DrawAppletList(bool blink = false);
+  FLASHMEM __attribute__((noinline)) void Init();
+  FLASHMEM __attribute__((noinline)) void ResetMappings();
+  FLASHMEM __attribute__((noinline)) void DrawAppletList(bool blink = false);
 
   // --- Quantizer helpers
   QuantEngine& GetQuantEngine(int ch);
   int GetLatestNoteNumber(int ch);
   int Quantize(int ch, int cv, int root = 0, int transpose = 0);
   int QuantizerLookup(int ch, int note);
-  void QuantizerConfigure(int ch, int scale, uint16_t mask = 0xffff);
+  FLASHMEM __attribute__((noinline)) void QuantizerConfigure(int ch, int scale, uint16_t mask = 0xffff);
+  FLASHMEM __attribute__((noinline)) void RefreshUserQuantizers();
   int GetScale(int ch);
   int GetRootNote(int ch);
-  int SetRootNote(int ch, int root);
-  void NudgeRootNote(int ch, int dir);
-  void NudgeOctave(int ch, int dir);
-  void NudgeScale(int ch, int dir);
-  void QuantizerEdit(int ch);
-  void MidiMapEdit(int ch);
-  void QEditEncoderMove(bool rightenc, int dir);
-  void MEditEncoderMove(bool rightenc, int dir);
-  void DrawMidiMaps(int curpos);
-  void DrawConfigRow(int row, int y, bool cur, bool editing);
-  void DrawPopup(const int config_cursor = 0, const int preset_id = 0, const bool blink = 0);
-  void ToggleClockRun();
-  void PokePopup(PopupType pop, ErrMsgIndex err = NO_ERROR);
-  void PokePopup(PopupType pop, const char* msg);
+  FLASHMEM __attribute__((noinline)) void QueueBeatSync();
+  FLASHMEM __attribute__((noinline)) int SetRootNote(int ch, int root);
+  FLASHMEM __attribute__((noinline)) void NudgeRootNote(int ch, int dir);
+  FLASHMEM __attribute__((noinline)) void NudgeOctave(int ch, int dir);
+  FLASHMEM __attribute__((noinline)) void NudgeScale(int ch, int dir);
+  FLASHMEM __attribute__((noinline)) void QuantizerEdit(int ch);
+  FLASHMEM __attribute__((noinline)) void MidiMapEdit(int ch);
+  FLASHMEM __attribute__((noinline)) void QEditEncoderMove(bool rightenc, int dir);
+  FLASHMEM __attribute__((noinline)) void MEditEncoderMove(bool rightenc, int dir);
+  FLASHMEM __attribute__((noinline)) void DrawMidiMaps(int curpos);
+  FLASHMEM __attribute__((noinline)) void DrawConfigRow(int row, int y, bool cur, bool editing);
+  FLASHMEM __attribute__((noinline)) void DrawPopup(const int config_cursor = 0, const int preset_id = 0, const bool blink = 0);
+  FLASHMEM __attribute__((noinline)) void ToggleClockRun();
+  FLASHMEM __attribute__((noinline)) void PokePopup(PopupType pop, ErrMsgIndex err = NO_ERROR);
+  FLASHMEM __attribute__((noinline)) void PokePopup(PopupType pop, const char* msg);
 
   peaks::MultistageEnvelope& GetEnvelope(int index);
   util::TuringShiftRegister& GetTM(int index);

@@ -44,6 +44,9 @@ namespace menu = OC::menu;
 #include "PongGame.h"
 #include "Backup.h"
 #include "SETTINGS.h"
+#if defined(ARDUINO_TEENSY41) && defined(ENABLE_APP_TXI2C2MIDI)
+#include "TXI2C2MIDI.h"
+#endif
 
 
 namespace OC {
@@ -136,6 +139,9 @@ static AppContainer<void // this space intentionally left blank
   , AppWaveformEditor
 #endif
   , AppBackup
+#if defined(ARDUINO_TEENSY41) && defined(ENABLE_APP_TXI2C2MIDI)
+  , AppTXI2C2MIDI
+#endif
 > app_container;
 
 static_assert(decltype(app_container)::TotalAppDataStorageSize() < AppData::kAppDataSize,

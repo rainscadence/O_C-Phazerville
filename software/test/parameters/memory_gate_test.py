@@ -12,10 +12,10 @@ spec.loader.exec_module(gate)
 def fixture(target="T41"):
     address = gate.FLASH[target][0] + 0x1000
     rows = [(address, 16, "r", f"Applet{i}::Parameters() const::entries")
-            for i in range(8)]
+            for i in range(12)]
     rows += [(address, 16, "R", "phz::parameters::CvSourceOptions")]
     rows += [(address, 8, "t", f"Applet{i}::Parameters() const")
-             for i in range(8)]
+             for i in range(12)]
     rows += [(address, 8, "T", "phz::parameters::" + name + ")")
              for name in gate.REQUIRED]
     rows += [(address, 8, "t", "phz::parameters::Field<App, int>::Read(void const*)")]
@@ -29,7 +29,7 @@ def nm(rows):
 class MemoryGateTest(unittest.TestCase):
     def test_both_active_slots(self):
         for target in gate.FLASH:
-            self.assertEqual(gate.validate(nm(fixture(target)), target), (8, 144, 15, 120))
+            self.assertEqual(gate.validate(nm(fixture(target)), target), (12, 208, 19, 152))
 
     def test_wrong_slot(self):
         with self.assertRaisesRegex(ValueError, "outside active flash slot"):
@@ -85,6 +85,11 @@ class MemoryGateTest(unittest.TestCase):
         rows[0] = (gate.FLASH["T41"][1] - 16, *rows[0][1:])
         gate.validate(nm(rows), "T41")
         rows[0] = (rows[0][0] + 1, *rows[0][1:])
+        with self.assertRaisesRegex(ValueError, "outside active flash slot"):
+            gate.validate(nm(rows), "T41")
+
+    def test_curve_options_in_ram(self):
+        rows = fixture() + [(0x20001000, 16, "r", "CrosspanApplet::Parameters() const::shapeOptions")]
         with self.assertRaisesRegex(ValueError, "outside active flash slot"):
             gate.validate(nm(rows), "T41")
 

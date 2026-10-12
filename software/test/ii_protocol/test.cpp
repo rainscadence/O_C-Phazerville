@@ -63,10 +63,10 @@ int main() {
   for (unsigned code = 0; code <= 65535; ++code) {
     assert(DecodeBoolean(static_cast<uint16_t>(code)) == (code >= 32768));
     uint8_t native = 0xfe;
-    assert(DecodeCvSource(static_cast<uint16_t>(code), native) == (code <= 57));
+    assert(DecodeCvSource(static_cast<uint16_t>(code), native) == (code <= 89));
     const uint8_t expected = code == 0 ? 0 : code <= 8 ? 0x40 + code - 1 :
-      code <= 24 ? 0x60 + code - 9 : code <= 56 ? 0x80 + code - 25 : 0xe0;
-    assert(native == (code <= 57 ? expected : 0xfe));
+      code <= 24 ? 0x60 + code - 9 : code <= 56 ? 0x80 + code - 25 : code == 57 ? 0xe0 : 0xc0 + code - 58;
+    assert(native == (code <= 89 ? expected : 0xfe));
   }
   for (unsigned address = 0; address < 256; ++address) {
     uint64_t record = 0xdead;
@@ -79,6 +79,18 @@ int main() {
     assert(DecodeAddress(false, false, record).status == AddressStatus::DisabledFault);
   }
   assert(DecodeAddress(true, false, 0).address == 0x45);
+  for (unsigned address = 0; address < 256; ++address) for (int enabled = 0; enabled < 2; ++enabled) {
+    uint64_t record = 0xdead;
+    const bool valid = address >= 8 && address <= 0x77;
+    assert(EncodeSettings(uint8_t(address), enabled, record) == valid);
+    if (!valid) { assert(record == 0xdead); continue; }
+    const auto decoded = DecodeAddress(true, true, record);
+    assert(decoded.address == address);
+    assert(decoded.status == (enabled ? AddressStatus::Ready : AddressStatus::DisabledUser));
+    assert(DecodeAddress(false, true, record).status == AddressStatus::DisabledFault);
+    for (unsigned bit = 17; bit < 64; ++bit)
+      assert(DecodeAddress(true, true, record | (uint64_t{1} << bit)).status == AddressStatus::DisabledFault);
+  }
   for (unsigned version = 0; version < 256; ++version)
     assert((DecodeAddress(true, true, (uint64_t{version} << 8) | 0x45).status ==
             AddressStatus::Ready) == (version == 1));

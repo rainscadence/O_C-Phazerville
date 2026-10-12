@@ -94,6 +94,13 @@ public:
     );
   }
 
+  CVInputMap* IiRecallInput(uint16_t field) override {
+    switch(field) {
+      case 0x100:return &sources[0][0]; case 0x101:return &sources[0][1];
+      case 0x102:return &sources[1][0]; case 0x103:return &sources[1][1];
+      default:return nullptr;
+    }
+  }
 protected:
   void SetHelp() {
     //                    "-------" <-- Label size guide

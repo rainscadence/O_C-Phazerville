@@ -266,6 +266,10 @@ public:
     return calibration_data_->calibrated_octaves[channel][value ? kOctaveGateHigh : kOctaveZero];
   }
 
+  // Convert a logical gate using the per-channel voltage calibration. This is
+  // separate from the legacy gate rail, which is intentionally higher.
+  static int32_t GateToDAC(DAC_CHANNEL channel, int32_t value, int high_voltage);
+
   // Set integer voltage value, where 0 = 0V, 1 = 1V
   static void set_octave(DAC_CHANNEL channel, int v) {
     set(channel, get_octave_offset(channel, v));

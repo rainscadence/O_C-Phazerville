@@ -1,9 +1,11 @@
 #pragma once
+#include <stdint.h>
 #if defined(ARDUINO_TEENSY41)
 namespace phz { namespace ii {
 void BeginTransition(bool recovery);
 void EndTransition(bool success);
-void SetHostActive(bool active);
+void SetHostActive(bool active, uint8_t family = 1,
+                   uint16_t quantizer_scale_count = 32768);
 }}
 #endif
 namespace phz { namespace ii {
@@ -31,6 +33,6 @@ class Transition {
   bool success_ = false;
 };
 #if !defined(ARDUINO_TEENSY41)
-inline void SetHostActive(bool) {}
+inline void SetHostActive(bool, uint8_t = 1, uint16_t = 32768) {}
 #endif
 }} // namespace phz::ii

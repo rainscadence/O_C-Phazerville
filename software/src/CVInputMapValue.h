@@ -2,6 +2,61 @@
 // Native CV input mapping. Included by CVInputMap.h after the frame context.
 
 struct CVInputMap {
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+private:
+  // Main-thread inventory, including cached applets and temporary preset maps.
+  // ISR code never walks this list. Copying settings must not copy list links.
+  inline static CVInputMap* binding_head = nullptr;
+  inline static uint64_t binding_lifetime = 0;
+  CVInputMap* binding_next = nullptr;
+  void RegisterBinding() { binding_next = binding_head; binding_head = this; ++binding_lifetime; }
+public:
+  CVInputMap() { RegisterBinding(); }
+  CVInputMap(const CVInputMap& other)
+      : source(other.source), attenuversion(other.attenuversion),
+        semitone_quant(other.semitone_quant) { RegisterBinding(); }
+  CVInputMap& operator=(const CVInputMap& other) {
+    if (this != &other) {
+      source = other.source;
+      attenuversion = other.attenuversion;
+      semitone_quant = other.semitone_quant;
+    }
+    return *this;
+  }
+  ~CVInputMap() {
+    ++binding_lifetime;
+    auto** link = &binding_head;
+    while (*link && *link != this) link = &(*link)->binding_next;
+    if (*link) *link = binding_next;
+  }
+  // Callback may change settings, but must not create/destroy mapping objects.
+  // Caller owns lifecycle protection and a short interrupt lock per mutation.
+  template<class Visit>
+  static size_t VisitIiBindings(size_t index, Visit visit) {
+    if (index >= 32) return 0;
+    size_t count = 0;
+    for (auto* map = binding_head; map; map = map->binding_next) {
+      if (map->source == (0xc0 | index)) { ++count; visit(*map); }
+    }
+    return count;
+  }
+  static size_t CountIiBindings(size_t index) {
+    return VisitIiBindings(index, [](CVInputMap&) {});
+  }
+  static uint32_t IiUsageMask() {
+    uint32_t mask = 0;
+    for (auto* map = binding_head; map; map = map->binding_next)
+      if ((map->source & 0xe0) == 0xc0) mask |= uint32_t(1) << (map->source & 31);
+    return mask;
+  }
+  static uint64_t IiBindingIdentity(size_t index) {
+    uint64_t fingerprint = binding_lifetime;
+    VisitIiBindings(index, [&](CVInputMap& map) {
+      fingerprint = (fingerprint ^ uint64_t(reinterpret_cast<uintptr_t>(&map))) * UINT64_C(1099511628211);
+    });
+    return fingerprint;
+  }
+#endif
   // upper 3 bits of source
   enum SourceType : uint8_t {
     TYPE_NONE = (0 << 5),
@@ -12,14 +67,18 @@ struct CVInputMap {
 
     TYPE_HID = (5 << 5),
     TYPE_RESERVED0 = (6 << 5),
+    TYPE_II = TYPE_RESERVED0, // additive source allocation; old meanings unchanged
     TYPE_INTERNAL = (7 << 5), // for noise, LFOs, S&H, etc.
   };
 
-  static constexpr SourceType ordered_types[5] = {
+  static constexpr SourceType ordered_types[] = {
     TYPE_NONE,
     TYPE_ADC,
     TYPE_DAC,
     TYPE_MIDI,
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+    TYPE_II,
+#endif
     TYPE_INTERNAL,
   };
 
@@ -40,6 +99,23 @@ public:
     const auto type = static_cast<SourceType>(candidate & 0xe0);
     const int count = channel_count(type);
     if (count <= 0 || (candidate & 0x1f) >= count) return false;
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+    if (!phz::ii::SelectableIiInput(phz::ii::virtual_inputs, candidate)) return false;
+#endif
+    source = candidate;
+    return true;
+  }
+  // Restore is distinct from a new selection: legacy disabled inputs retain
+  // their binding, but an Output slot is never a legal CV input.
+  bool RestoreSource(uint8_t candidate) {
+    const auto type = static_cast<SourceType>(candidate & 0xe0);
+    const int count = channel_count(type);
+    if (count <= 0 || (candidate & 0x1f) >= count) return false;
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+    if (type == TYPE_II &&
+        phz::ii::virtual_inputs.DirectionalMappings::Get(candidate & 31).direction ==
+          phz::ii::DirectionalMappings::Direction::Output) return false;
+#endif
     source = candidate;
     return true;
   }
@@ -75,6 +151,10 @@ public:
         return 2 * APPLET_CURSOR_COUNT;
       case TYPE_MIDI:
         return MIDIMAP_MAX;
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+      case TYPE_II:
+        return 32;
+#endif
       case TYPE_INTERNAL:
         return 1;
     }
@@ -90,6 +170,10 @@ public:
 
       case TYPE_MIDI:
         return frame.MIDIState.mapping[index()].ViewOut();
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+      case TYPE_II:
+        return phz::ii::virtual_inputs.Value(index());
+#endif
 
       case TYPE_INTERNAL:
         // noise source
@@ -134,7 +218,8 @@ public:
     source = ordered_types[tidx] | sidx;
     return oldtype != source_type();
   }
-  void ChangeSource(int dir) {
+private:
+  void ChangeSourceStep(int dir) {
     int sidx = index() + dir;
     if (sidx < 0) {
       if (ChangeSourceType(-1))
@@ -147,10 +232,44 @@ public:
     CONSTRAIN(sidx, 0, channel_count(source_type()) - 1);
     source = source_type() | uint8_t(sidx);
   }
+public:
+  void ChangeSource(int dir) {
+    if (!dir) return;
+    // Preserve accelerated navigation, but bound arithmetic and skip at most
+    // the complete 32-slot ii block. Every applet uses this same selector.
+    ChangeSourceStep(constrain(dir, -32, 32));
+#if defined(ARDUINO_TEENSY41) || defined(PHZ_VIRTUAL_INPUT_TEST)
+    for (unsigned n = 0; n < 32 &&
+         !phz::ii::SelectableIiInput(phz::ii::virtual_inputs, source); ++n)
+      ChangeSourceStep(dir > 0 ? 1 : -1);
+#endif
+  }
 
   void SetMidiMap(uint8_t midx) {
     CONSTRAIN(midx, 0, channel_count(TYPE_MIDI) - 1);
     source = TYPE_MIDI | (midx & 0x1f);
+  }
+
+  // UI category shortcut. Physical and virtual logical outputs share their
+  // stored type, but are separate browsing groups. Never change live routing
+  // while scanning or expose disabled/output-mode ii input candidates.
+  void ChangeSourceGroup(int dir) {
+    if (!dir) return;
+    const auto group = [](const CVInputMap& map) {
+      return int(map.source_type()) * 2 +
+        (map.source_type() == TYPE_DAC && map.index() >= DAC_CHANNEL_COUNT);
+    };
+    const int original = group(*this);
+    CVInputMap candidate(*this);
+    for (unsigned n = 0; n < 256; ++n) {
+      const auto previous = candidate.Source();
+      candidate.ChangeSource(dir > 0 ? 1 : -1);
+      if (candidate.Source() == previous) return;
+      if (group(candidate) != original) {
+        SetSource(candidate.Source());
+        return;
+      }
+    }
   }
   void SetInput(uint8_t idx) {
     CONSTRAIN(idx, 0, channel_count(TYPE_ADC) - 1);
@@ -167,6 +286,14 @@ public:
 
   const char * InputName() const {
     static char in_label[] = "C 1";
+    static char ii_label[] = "I 1";
+
+    if (source_type() == TYPE_II) {
+      const unsigned n = index() + 1;
+      ii_label[1] = n < 10 ? ' ' : char('0' + n / 10);
+      ii_label[2] = char('0' + n % 10);
+      return ii_label;
+    }
 
     if (!source) {
       return " - ";
@@ -200,6 +327,10 @@ public:
   }
 
   uint8_t const* Icon() const {
+    if (source_type() == TYPE_II) {
+      static const uint8_t ii_icon[8] = {0, 0x7a, 0, 0, 0x7a, 0, 0, 0};
+      return ii_icon;
+    }
     switch (source_type()) {
       case TYPE_NONE:
         return PARAM_MAP_ICONS + 0;

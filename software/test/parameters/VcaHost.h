@@ -1,4 +1,6 @@
 #pragma once
+#define PHZ_VIRTUAL_INPUT_TEST
+#include "ii/VirtualInputState.h"
 #include "AppletHost.h"
 #include <array>
 #include <tuple>
@@ -21,6 +23,7 @@ inline uint8_t PARAM_MAP_ICONS[256]{};
 inline const uint8_t *MOD_ICON=nullptr,*ZAP_ICON=nullptr;
 inline long random(long max){return max/2;}
 struct FrameFixture {
+ bool gate_high[12]{};
  int adc[8]{},dac[16]{};
  int In(int i)const{assert(i>=0&&i<8);return adc[i];}
  int ViewOut(int i)const{assert(i>=0&&i<16);return dac[i];}

@@ -15,6 +15,9 @@
 #include "OC_app_switcher.h"
 #include "src/drivers/display.h"
 #include "HSUtils.h"
+#if defined(ARDUINO_TEENSY41)
+#include "ii/InterruptLock.h"
+#endif
 
 #ifdef VOR
 #include "VBiasManager.h"
@@ -48,7 +51,7 @@ void Ui::Init() {
   for (size_t i = 0; i < count; ++i) {
     buttons_[i].Init(button_pins[i], OC_GPIO_BUTTON_PINMODE);
   }
-  std::fill(button_press_time_, button_press_time_ + 4, 0);
+  std::fill(button_press_time_, button_press_time_ + CONTROL_BUTTON_LAST, 0);
   button_state_ = 0;
   button_ignore_mask_ = 0;
   screensaver_ = false;
@@ -89,6 +92,23 @@ void Ui::preempt_screensaver(bool v) {
   preempt_screensaver_ = v;
 }
 
+#if defined(ARDUINO_TEENSY41)
+FLASHMEM bool Ui::RemoteGesture(const phz::remote::Gesture& g) {
+  phz::ii::InterruptLock lock;
+  const bool quiet = !physical_buttons_ && !button_state_ && !event_queue_.available();
+  if (g.kind == 'A') return remote_gestures_.Arm(ticks_, quiet);
+  if (g.kind == 'X') return remote_gestures_.Disarm();
+  return remote_gestures_.Start(g, ticks_, quiet, but_mid == 0xFF ? 4 : CONTROL_BUTTON_LAST);
+}
+
+FLASHMEM phz::remote::GestureController::State Ui::RemoteGestureState() {
+  phz::ii::InterruptLock lock;
+  auto s = remote_gestures_.Snapshot(ticks_);
+  s.busy = s.busy || event_queue_.available();
+  return s;
+}
+#endif
+
 void FASTRUN Ui::Poll() {
 
   uint32_t now = ++ticks_;
@@ -99,8 +119,25 @@ void FASTRUN Ui::Poll() {
 #else
   const size_t count = CONTROL_BUTTON_LAST;
 #endif
+  encoder_right_.Poll();
+  encoder_left_.Poll();
+  int32_t right_increment = encoder_right_.Read();
+  int32_t left_increment = encoder_left_.Read();
+#if defined(ARDUINO_TEENSY41)
+  physical_buttons_ = 0;
+  for (size_t i = 0; i < count; ++i)
+    if (buttons_[i].read_immediate()) physical_buttons_ |= control_mask(i);
+  const auto synthetic = remote_gestures_.Tick(now,
+    physical_buttons_ || right_increment || left_increment);
+  right_increment += synthetic.right;
+  left_increment += synthetic.left;
+#endif
   for (size_t i = 0; i < count; ++i) {
-    if (buttons_[i].Poll())
+    if (buttons_[i].Poll(
+#if defined(ARDUINO_TEENSY41)
+        synthetic.buttons & control_mask(i)
+#endif
+        ))
       button_state |= control_mask(i);
   }
 
@@ -121,17 +158,10 @@ void FASTRUN Ui::Poll() {
     }
   }
 
-  encoder_right_.Poll();
-  encoder_left_.Poll();
-
-  int32_t increment;
-  increment = encoder_right_.Read();
-  if (increment)
-    PushEvent(UI::EVENT_ENCODER, CONTROL_ENCODER_R, increment, button_state);
-
-  increment = encoder_left_.Read();
-  if (increment)
-    PushEvent(UI::EVENT_ENCODER, CONTROL_ENCODER_L, increment, button_state);
+  if (right_increment)
+    PushEvent(UI::EVENT_ENCODER, CONTROL_ENCODER_R, right_increment, button_state);
+  if (left_increment)
+    PushEvent(UI::EVENT_ENCODER, CONTROL_ENCODER_L, left_increment, button_state);
 
   button_state_ = button_state;
 }

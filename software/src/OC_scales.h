@@ -12,7 +12,7 @@ namespace OC {
 using Scale = braids::Scale;
 
 static constexpr int kMaxScaleLength = 16;
-static constexpr int kMinScaleLength = 4;
+static constexpr int kMinScaleLength = 1;
 
 class Scales {
 public:

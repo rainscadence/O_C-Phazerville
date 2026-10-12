@@ -6,7 +6,11 @@
 #if defined(__IMXRT1062__)
 #define PHZ_PARAMETER_STORAGE __attribute__((section(".progmem.parameters"), used))
 #define PHZ_PARAMETER_CODE __attribute__((section(".flashmem.parameters"), noinline, used))
+// Explicit opt-in for reviewed main-loop View/button/encoder overrides only.
+// Never apply to Controller, ISR, DSP, or restore paths by name alone.
+#define PHZ_APPLET_UI_CODE __attribute__((section(".flashmem.applet_ui"), noinline, used))
 #else
 #define PHZ_PARAMETER_STORAGE
 #define PHZ_PARAMETER_CODE
+#define PHZ_APPLET_UI_CODE
 #endif

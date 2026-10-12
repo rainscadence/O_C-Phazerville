@@ -24,7 +24,6 @@
 #include "../util/pewpewsplash.h"
 #endif
 
-extern "C" void _reboot_Teensyduino_();
 using namespace OC;
 
 OC_APP_CLASS(AppSettings, TWOCCS("SE"), "Setup/About", "Settings"),
@@ -36,6 +35,8 @@ public:
   bool calibration_mode = false;
   bool calibration_complete = true;
   bool cal_save_q = false;
+  bool reset_confirmation = false;
+  elapsedMillis reset_confirmation_timeout = 0;
   int current_octave = 0; // for fine-tuning DAC points
   OC::DigitalInputDisplay digital_input_displays[4];
   OC::TickCount tick_count;
@@ -222,6 +223,11 @@ public:
   void Controller()
   {
     using namespace OC;
+    if (reset_confirmation) {
+      if (reset_confirmation_timeout >= 10000)
+        reset_confirmation = false;
+      return;
+    }
     if (calibration_mode && !calibration_complete)
     {
       uint32_t ticks = tick_count.Update();
@@ -293,7 +299,24 @@ public:
   };
   int pick_left = 0, pick_right = 0;
 
+    void DrawResetConfirmation() const {
+      gfxHeader("Setup: Reset");
+      gfxPrint(1, 15, "Reset application");
+      gfxPrint(1, 25, "settings on EEPROM?");
+      gfxPos(1, 40);
+      graphics.print("Auto-cancel: ");
+      const uint32_t elapsed = reset_confirmation_timeout;
+      const uint32_t remaining = elapsed < 10000 ? 10000 - elapsed : 0;
+      graphics.print(static_cast<int>((remaining + 999) / 1000));
+      graphics.print("s");
+      gfxPrint(0, 55, "[CANCEL]         [OK]");
+    }
+
     void View() const {
+      if (reset_confirmation) {
+        DrawResetConfirmation();
+        return;
+      }
       if (calibration_mode) {
         DrawCalibration();
         return;
@@ -452,6 +475,17 @@ public:
 
     void HandleUiEvent(const UI::Event &event) {
       if (!calibration_mode) {
+        if (reset_confirmation) {
+          if (event.type == UI::EVENT_BUTTON_PRESS) {
+            if (event.control == OC::CONTROL_BUTTON_L) {
+              reset_confirmation = false;
+            } else if (event.control == OC::CONTROL_BUTTON_R) {
+              reset_confirmation = false;
+              OC::app_switcher.Init(true, true);
+            }
+          }
+          return;
+        }
         if (event.control == OC::CONTROL_ENCODER_L) {
           reflash = (event.value > 0);
         }
@@ -597,22 +631,12 @@ public:
         calibration_mode = true;
     }
     void Reflash() {
-      uint32_t start = millis();
-      while(millis() < start + SETTINGS_SAVE_TIMEOUT_MS) {
-        GRAPHICS_BEGIN_FRAME(true);
-        gfxPos(5, 10);
-        graphics.print("Flash Upgrade Mode");
-        gfxPos(5, 19);
-        graphics.print("(use Teensy Loader)");
-        GRAPHICS_END_FRAME();
-      }
-
-      // special teensy_reboot command
-      _reboot_Teensyduino_();
+      OC::EnterFirmwareUpdateMode();
     }
 
     void FactoryReset() {
-      OC::app_switcher.Init(true);
+      reset_confirmation = true;
+      reset_confirmation_timeout = 0;
     }
 };
 

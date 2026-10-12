@@ -54,9 +54,11 @@ SECTIONS
 
 	.data : {
 		*(.endpoint_queue)   
+		/* Pack the aligned vector table before ordinary data. Keeping it last
+		 * can push the following aligned BSS into another 4 KiB page. */
+		KEEP(*(.vectorsram))
 		*(SORT_BY_ALIGNMENT(SORT_BY_NAME(.rodata*)))
 		*(SORT_BY_ALIGNMENT(SORT_BY_NAME(.data*)))
-		KEEP(*(.vectorsram))
 	} > DTCM  AT> FLASH
 
 	.bss ALIGN(4) : {
@@ -91,6 +93,14 @@ SECTIONS
 	_sdata = ADDR(.data);
 	_edata = ADDR(.data) + SIZEOF(.data);
 	_sdataload = LOADADDR(.data);
+
+	/* Teensy 4.1: 160 IRQs plus 16 core vectors, four bytes each. Startup
+	 * copies this entire region and loads VTOR from _VectorsRam. */
+	ASSERT((endpoint_queue_head & 4095) == 0,
+	       "USB endpoint queue lost its 4 KiB alignment")
+	ASSERT((_VectorsRam & 1023) == 0 && _VectorsRam >= _sdata &&
+	       (_VectorsRam + 704) <= _edata,
+	       "Interrupt vectors must be aligned and inside initialized data")
 
 	_sbss = ADDR(.bss);
 	_ebss = ADDR(.bss) + SIZEOF(.bss);

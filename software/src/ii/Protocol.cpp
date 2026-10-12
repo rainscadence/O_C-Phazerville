@@ -45,6 +45,21 @@ bool DecodeInteger(uint16_t code, int32_t minimum, int32_t maximum,
 
 bool DecodeBoolean(uint16_t code) { return code >= 32768; }
 
+bool DecodeVirtualCV(const uint8_t* bytes, size_t size, Write& result) {
+  if (!bytes || size != kFrameSize || bytes[0] != kWriteVirtualCV) return false;
+  return DecodeVirtualSignal(bytes, size, result);
+}
+
+bool DecodeVirtualSignal(const uint8_t* bytes, size_t size, Write& result) {
+  if (!bytes || size != kFrameSize || bytes[0] < kWriteVirtualCV ||
+      bytes[0] > kWriteVirtualNormalized) return false;
+  const Write decoded{ReadWord(bytes + 1), ReadWord(bytes + 3), ReadWord(bytes + 5)};
+  if (decoded.slot < 1 || decoded.slot > 32 || decoded.parameter != 0) return false;
+  if (bytes[0] == kWriteVirtualNormalized && decoded.value > 16384) return false;
+  result = decoded;
+  return true;
+}
+
 // Approved T41 option codes, not the sparse native CVInputMap source bytes.
 bool DecodeCvSource(uint16_t code, uint8_t& result) {
   uint8_t native;
@@ -53,6 +68,7 @@ bool DecodeCvSource(uint16_t code, uint8_t& result) {
   else if (code <= 24) native = static_cast<uint8_t>(0x60 + code - 9);
   else if (code <= 56) native = static_cast<uint8_t>(0x80 + code - 25);
   else if (code == 57) native = 0xe0;
+  else if (code <= 89) native = static_cast<uint8_t>(0xc0 + code - 58);
   else return false;
   result = native;
   return true;
@@ -77,8 +93,17 @@ AddressConfig DecodeAddress(bool fileValid, bool present,
   if (!fileValid) return {0, AddressStatus::DisabledFault};
   if (!present) return {kDefaultAddress, AddressStatus::Ready};
   const uint8_t address = static_cast<uint8_t>(record);
-  if ((record >> 8) != 1 || !ValidAddress(address))
-    return {0, AddressStatus::DisabledFault};
-  return {address, AddressStatus::Ready};
+  if (!ValidAddress(address)) return {0, AddressStatus::DisabledFault};
+  if ((record >> 8) == 1) return {address, AddressStatus::Ready};
+  // v2 adds explicit opt-in at bit16. All higher bits remain reserved.
+  if (((record >> 8) & 0xff) == 2 && !(record >> 17))
+    return {address, (record & (uint64_t{1} << 16)) ?
+      AddressStatus::Ready : AddressStatus::DisabledUser};
+  return {0, AddressStatus::DisabledFault};
+}
+bool EncodeSettings(uint8_t address, bool enabled, uint64_t& record) {
+  if (!ValidAddress(address)) return false;
+  record = (uint64_t{enabled} << 16) | (uint64_t{2} << 8) | address;
+  return true;
 }
 }} // namespace phz::ii

@@ -60,6 +60,9 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial8, MIDI1);
 #include "usb_desc.h"
 #include "Wire.h"
 #include "ii/Follower.h"
+#include "ii/VirtualInputState.h"
+#include "ii/InterruptLock.h"
+#include "remote/Parser.h"
 #ifdef MULTIBOOT
 #include "util/cachedisable.h"
 #endif
@@ -198,7 +201,10 @@ void BootMenu() {
 }
 #endif
 
-void setup() {
+// Boot initialization is not latency-sensitive. Keep it in flash so the T4.1
+// audio build does not spend a 32 KiB FlexRAM bank on a few hundred bytes past
+// the ITCM boundary.
+FLASHMEM void setup() {
   delay(50);
   Serial.begin(9600);
 
@@ -348,8 +354,10 @@ void setup() {
   OC::app_switcher.Init(reset_settings || firstrun);
 
 #if defined(ARDUINO_TEENSY41)
-  phz::ii::StartFollower(OC::global_settings.ii_address);
-  if (!OC::global_settings.ii_address.enabled())
+  phz::ii::StartFollower(OC::global_settings.ii_address, I2C_Expansion);
+  if (!I2C_Expansion)
+    HS::PokePopup(HS::MESSAGE_POPUP, "ii OFF: unsupported HW");
+  else if (OC::global_settings.ii_address.faulted())
     HS::PokePopup(HS::MESSAGE_POPUP, "ii OFF: config fault");
 #endif
 
@@ -365,6 +373,79 @@ void setup() {
 }
 
 /*  ---------    main loop  --------  */
+
+#if defined(ARDUINO_TEENSY41)
+// Non-time-critical USB control stays in flash, not the audio/ISR code bank.
+static const char qa_state_format[] PROGMEM =
+  "PHZQA 1 scope=%d ready=%u cursor=%d editing=%u active=%d pending=%d dirty=%u fault=%u\n";
+static const char qa_ok[] PROGMEM = "PHZQA 1 OK";
+static const char qa_blocked[] PROGMEM = "PHZQA 1 BLOCKED";
+PHZ_REMOTE_CODE void PrintRemoteUiState(OC::UiMode ui_mode) {
+  using namespace OC;
+  const auto* app = app_switcher.current_app();
+  const auto s = app ? app->RemoteUiState() : phz::remote::UiState{};
+  unsigned buttons = 0;
+  for (unsigned bit = 1; bit < 128; bit <<= 1)
+    if (ui.read_immediate(static_cast<UiControl>(bit))) buttons |= bit;
+  Serial.printf(PSTR("UI 1 known=%u page=%d input=%d popup=%u view=%d select=%d preset=%d clock=%u quant=%u midi=%u mode=%d buttons=%u ignored=%u\n"),
+    unsigned(s.known), s.page, s.input, unsigned(s.popup), s.view, s.select,
+    s.preset, unsigned(s.clock), unsigned(s.quant), unsigned(s.midi),
+    int(ui_mode), buttons, unsigned(ui.diagnostic_ignore_mask()));
+}
+
+PHZ_REMOTE_CODE bool HandleRemoteByte(int cmd, OC::UiMode ui_mode) {
+  using namespace OC;
+  static phz::remote::Parser remote_parser;
+  const auto result = remote_parser.Feed(uint8_t(cmd), millis());
+  if (result == phz::remote::Parser::Result::Pass) return false;
+  if (result == phz::remote::Parser::Result::Invalid)
+    Serial.println(PSTR("PHZREMOTE 1 INVALID"));
+  else if (result == phz::remote::Parser::Result::Action) {
+    const char selector = remote_parser.selector();
+    if (selector == 'G') {
+      const auto g = remote_parser.gesture();
+      if (g.kind == '?') {
+        const auto s = ui.RemoteGestureState();
+        Serial.printf(PSTR("PHZCTRL 1 armed=%u busy=%u conflict=%u seq=%lu held=%u physical=%u mode=%d app=%u\n"),
+          unsigned(s.armed), unsigned(s.busy), unsigned(s.conflict), s.sequence,
+          unsigned(s.held), unsigned(ui.physical_buttons()), int(ui_mode),
+          unsigned(app_switcher.current_slot().id()));
+      } else {
+        const bool accepted = (ui_mode == UI_MODE_MENU || ui_mode == UI_MODE_APP_SETTINGS ||
+          ui_mode == UI_MODE_SCREENSAVER) && CORE::app_loop_enabled && ui.RemoteGesture(g);
+        Serial.println(accepted ? PSTR("PHZCTRL 1 OK") : PSTR("PHZCTRL 1 BLOCKED"));
+      }
+    }
+    else if (selector == '?') Serial.println(PSTR("PHZREMOTE 1 READY scope=ii-maps"));
+    else if (selector == 'S') {
+      const auto* app = app_switcher.current_app();
+      const auto state = app->RemoteUiState();
+      const bool ready = ui_mode == UI_MODE_MENU && CORE::app_loop_enabled &&
+        state.qa_scope == 1 && app_switcher.current_app()->RemoteUi('Q');
+      Serial.printf(qa_state_format,
+        state.qa_scope, unsigned(ready), state.qa_cursor, unsigned(state.qa_editing),
+        state.qa_active, state.qa_pending, unsigned(state.qa_dirty), unsigned(state.qa_fault));
+    }
+    else if (selector == 'J' || selector == 'K' || selector == 'N' ||
+             selector == 'P' || selector == 'C' || selector == 'E') {
+      const bool accepted = ui_mode == UI_MODE_MENU && CORE::app_loop_enabled &&
+        app_switcher.current_app()->RemoteUiState().qa_scope == 1 &&
+        app_switcher.current_app()->RemoteUi(selector);
+      Serial.println(accepted ? qa_ok : qa_blocked);
+      if (accepted) { ui.Poke(); MENU_REDRAW = 1; }
+    }
+    else {
+      const auto d = phz::ii::FollowerDiagnostics();
+      const bool accepted = ui_mode == UI_MODE_MENU && CORE::app_loop_enabled &&
+        d.active && !d.fault && !d.depth &&
+        app_switcher.current_app()->RemoteUi(selector);
+      Serial.println(accepted ? PSTR("PHZREMOTE 1 OK") : PSTR("PHZREMOTE 1 BLOCKED"));
+      if (accepted) { ui.Poke(); MENU_REDRAW = 1; }
+    }
+  }
+  return true;
+}
+#endif
 
 void FASTRUN loop() {
   using namespace OC;
@@ -451,9 +532,36 @@ void FASTRUN loop() {
     // check for request from PC to capture the screen
     if (Serial && Serial.available() > 0) {
       bool capreq = false;
+      unsigned serial_budget = 32;
       do {
         int cmd = Serial.read();
+#if defined(ARDUINO_TEENSY41)
+        if (HandleRemoteByte(cmd, ui_mode)) continue;
+#endif
         switch (cmd) {
+#if defined(ARDUINO_TEENSY41)
+          // Read-only, versioned diagnostics. No debug/reset command required.
+          // Host must stop screen polling and finish its current frame first.
+          case '?': {
+            const auto d = phz::ii::FollowerDiagnostics();
+            Serial.printf(PSTR("PHZII 1 registered=%u active=%u fault=%u epoch=%lu queued=%u depth=%u\n"),
+              phz::ii::FollowerRegistered(), d.active, d.fault, d.epoch,
+              unsigned(d.queued), d.depth);
+            Serial.printf(PSTR("COUNTS applied=%lu serviced=%lu blocked=%lu malformed=%lu unsupported=%lu stale=%lu rejected=%lu overflow=%lu\n"),
+              d.counts.applied, d.counts.serviced, d.counts.blocked, d.counts.malformed,
+              d.counts.unsupported, d.counts.stale, d.rejected, d.overflow);
+            for (size_t i = 0; i < phz::ii::VirtualInputs::kCount; ++i) {
+              phz::ii::VirtualInputs::Snapshot s;
+              { phz::ii::InterruptLock lock; s = phz::ii::virtual_inputs.Get(i); }
+              // Each channel is a coherent snapshot; printing never holds IRQs.
+              Serial.printf(PSTR("INPUT %u range=%u received=%u code=%u value=%ld\n"),
+                unsigned(i + 1), unsigned(s.range), s.received, s.code, long(s.value));
+            }
+            PrintRemoteUiState(ui_mode);
+            Serial.println(PSTR("END PHZII"));
+            break;
+          }
+#endif
 #ifdef PRINT_DEBUG
           case 'z':
             Serial.println("-=[ PEW PEW NERDS! ]=-");
@@ -541,7 +649,7 @@ void FASTRUN loop() {
             capreq = true;
             break;
         }
-      } while (Serial.available() > 0);
+      } while (--serial_budget && Serial.available() > 0);
       if (capreq) {
         display::frame_buffer.capture_request();
         cap_idx = 0;

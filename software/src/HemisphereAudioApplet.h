@@ -43,14 +43,18 @@ public:
   virtual void mainloop() {}
 
   virtual void OnDataReceive(uint64_t data) {
+#ifdef PRINT_DEBUG
     Serial.println(
       "Warning: default OnDataReceive() called; either override this or OnDataReceive(const std::<array<uint64_t, CONFIG_SIZE>& data)"
     );
+#endif
   }
   virtual uint64_t OnDataRequest() {
+#ifdef PRINT_DEBUG
     Serial.println(
       "Warning: default OnDataRequest() called; either override this or OnDataRequest(std::<array<uint64_t, CONFIG_SIZE>& data)"
     );
+#endif
     return 0;
   }
   virtual void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) {

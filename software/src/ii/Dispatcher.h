@@ -1,6 +1,8 @@
 #pragma once
 #include "Parameter.h"
 #include "ReceiveQueue.h"
+#include "HostAction.h"
+#include "HostIdentity.h"
 #include <stdint.h>
 #include <limits>
 
@@ -14,6 +16,19 @@ class Backend {
   // Final application-owned dependency validation and absolute assignment.
   // Return false WITHOUT any mutation when dependencies cannot be satisfied.
   virtual bool Apply(const Prepared&) = 0;
+  // Main-loop only, WITHOUT the IRQ lock. Rejected must not mutate live state;
+  // Failed denotes partial mutation and keeps ingress faulted closed.
+  virtual HostActionResult ApplyHostAction(const HostAction&) { return HostActionResult::Rejected; }
+  // Main-loop snapshot under a short IRQ lock; no allocation, I/O or mutation.
+  virtual bool SnapshotHostIdentity(HostIdentity&) { return false; }
+  // Optional signal-bank sink. Same bounded, allocation-free lock contract.
+  virtual bool ApplyVirtualCV(uint16_t, uint16_t) { return false; }
+  virtual bool ApplyVirtualSignal(uint8_t command, uint16_t channel, uint16_t value) {
+    return command == kWriteVirtualCV && ApplyVirtualCV(channel, value);
+  }
+  // Bounded active-app quantizer commit under the same short IRQ lock used by
+  // ordinary parameter writes. No allocation, storage or lifecycle changes.
+  virtual bool ApplyQuantizer(const pc_qtz_request&) { return false; }
 };
 struct Counters {
   uint32_t blocked = 0, malformed = 0, unsupported = 0, stale = 0;
@@ -39,6 +54,11 @@ class Dispatcher {
     Lock lock;
     if (!Open()) { ++counts_.blocked; return false; }
     return queue_.Capture(bytes, size);
+  }
+  bool CaptureQuantizer(const pc_qtz_request& request) {
+    Lock lock;
+    if (!Open()) { ++counts_.blocked; return false; }
+    return queue_.CaptureQuantizer(request);
   }
   void Reject() { Lock lock; queue_.Reject(); }
   void SetActive(bool active) {
@@ -70,17 +90,56 @@ class Dispatcher {
             depth_, active_, fault_, prepared_, busy_, exhausted_};
   }
   void Service(Backend& backend) {
-    uint8_t frame[kFrameSize];
+    ReceiveQueue::Item item;
     uint32_t epoch;
     {
       Lock lock;
-      if (busy_ || !Open() || !queue_.Pop(frame)) return;
+      if (busy_ || !Open() || !queue_.Pop(item)) return;
       busy_ = true;
       epoch = epoch_;
       ++counts_.serviced;
     }
+    if (item.kind == ReceiveQueue::Kind::Quantizer) {
+      Lock lock;
+      if (!Current(epoch)) ++counts_.stale;
+      else if (backend.ApplyQuantizer(item.quantizer)) ++counts_.applied;
+      else ++counts_.unsupported;
+      Finish();
+      return;
+    }
+    const uint8_t* frame = item.frame;
     Write write{};
-    if (!DecodeWrite(frame, sizeof(frame), write)) {
+    if (frame[0] == 7 || frame[0] == 8) {
+      HostAction action{};
+      {
+        Lock lock;
+        if (!Current(epoch)) { ++counts_.stale; Finish(); return; }
+        if (!DecodeHostAction(frame, kFrameSize, action)) {
+          ++counts_.malformed; Finish(); return;
+        }
+        Begin(false); // Purge old work and block ingress across host changes.
+      }
+      const auto result = backend.ApplyHostAction(action);
+      {
+        Lock lock;
+        End(result != HostActionResult::Failed);
+        if (result == HostActionResult::Applied && !fault_) ++counts_.applied;
+        else ++counts_.unsupported;
+        Finish();
+      }
+      return;
+    }
+    if (frame[0] >= kWriteVirtualCV && frame[0] <= kWriteVirtualNormalized) {
+      const bool decoded = DecodeVirtualSignal(frame, kFrameSize, write);
+      Lock lock;
+      if (!Current(epoch)) ++counts_.stale;
+      else if (!decoded) ++counts_.malformed;
+      else if (backend.ApplyVirtualSignal(frame[0], write.slot, write.value)) ++counts_.applied;
+      else ++counts_.unsupported;
+      Finish();
+      return;
+    }
+    if (!DecodeWrite(frame, kFrameSize, write)) {
       Lock lock;
       ++counts_.malformed;
       Finish();

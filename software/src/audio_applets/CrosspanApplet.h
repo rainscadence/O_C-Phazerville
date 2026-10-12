@@ -1,7 +1,9 @@
 #pragma once
+#include "../parameters/CvMapping.h"
 
 class CrosspanApplet : public HemisphereAudioApplet {
 public:
+  phz::parameters::Schema Parameters() const override;
   const char* applet_name() {
     return "Crosspan";
   }
@@ -57,6 +59,7 @@ public:
     attenuations[1].Push(float_to_q15(in));
   }
 
+  PHZ_APPLET_UI_CODE
   void View() override {
     gfxFrame(1, 28, 62, 8);
 
@@ -79,27 +82,38 @@ public:
     gfxDisplayInputMapEditor();
   }
 
+  PHZ_APPLET_UI_CODE
   void OnButtonPress() override {
     if (CheckEditInputMapPress(cursor, IndexedInput(1, crosspan_cv)))
       return;
     CursorToggle();
   }
 
+  PHZ_APPLET_UI_CODE
   void OnEncoderMove(int direction) override {
     if (!EditMode()) {
       MoveCursor(cursor, direction, 2);
       return;
     }
-    if (EditSelectedInputMap(direction)) return;
+    if (IsEditingInputMap()) {
+      auto map = std::get_if<CVInputMap*>(&selected_input_map);
+      if (map && *map == &crosspan_cv) AdjustParameterNative(3, direction);
+      return;
+    }
     switch (cursor) {
       case 0:
-        crosspan = constrain(crosspan + direction, 0, 100);
+        AdjustParameterNative(1, direction);
         break;
       case 1:
-        crosspan_cv.ChangeSource(direction);
+        {
+          auto next = crosspan_cv;
+          next.ChangeSource(direction);
+          SetParameterNative(2, next.Source());
+        }
         break;
       case 2:
-        xfade_shape = static_cast<XfadeShape>(xfade_shape + direction);
+        SetParameterNative(4, constrain(int64_t(xfade_shape) + direction, int64_t(0), int64_t(1)));
+        break;
 
       default:
         break;
@@ -112,6 +126,9 @@ public:
 
   void OnDataReceive(uint64_t data) override {
     UnpackPackables(data, crosspan, crosspan_cv, pack<1>(xfade_shape));
+    crosspan = constrain(crosspan, 0, 100);
+    if (!crosspan_cv.RestoreSource(crosspan_cv.Source())) crosspan_cv.SetSource(0);
+    crosspan_cv.attenuversion = constrain(crosspan_cv.attenuversion, -127, 127);
   }
 
   AudioStream* InputStream() override {
@@ -130,7 +147,7 @@ private:
   int8_t cursor = 0;
   int8_t crosspan = 0;
   CVInputMap crosspan_cv;
-  XfadeShape xfade_shape;
+  XfadeShape xfade_shape = EQUAL_POWER;
 
   AudioPassthrough<2> input;
   std::array<InterpolatingStream<>, 2> attenuations;
@@ -138,3 +155,26 @@ private:
   std::array<AudioMixer<2>, 2> mixers;
   AudioPassthrough<2> output;
 };
+
+phz::parameters::Schema PHZ_PARAMETER_CODE CrosspanApplet::Parameters() const {
+  using namespace phz::parameters;
+  using App = CrosspanApplet;
+  using Map = CvMapping<App, &App::crosspan_cv>;
+  static constexpr Option shapeOptions[] PHZ_PARAMETER_STORAGE = {
+    {0, EQUAL_POWER}, {1, EQUAL_AMPLITUDE},
+  };
+  static constexpr Entry entries[] PHZ_PARAMETER_STORAGE = {
+    Field<App, &App::crosspan>::Make(1, "crosspan", "Crosspan", "percent", 0, 100),
+    Map::Source(2, "crosspan_cv.source", "Crosspan CV source"),
+    Map::Attenuversion(3, "crosspan_cv.attenuversion", "Crosspan CV amount"),
+    {4, "xfade_shape", "Fade curve", "curve",
+      {Kind::Enumeration, 0, 0, shapeOptions, 2},
+      [](const Owner& o) -> int32_t { return static_cast<const App&>(o).xfade_shape; },
+      [](Owner& o, int32_t value, uint64_t) {
+        static_cast<App&>(o).xfade_shape = static_cast<XfadeShape>(value);
+        return true;
+      }},
+  };
+  static_assert(Valid(entries), "Invalid Crosspan parameter schema");
+  return {entries, sizeof(entries) / sizeof(entries[0])};
+}
